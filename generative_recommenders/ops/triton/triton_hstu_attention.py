@@ -55,9 +55,33 @@ try:
     # @manual=//triton:triton
     from triton.tools.tensor_descriptor import TensorDescriptor
 
-    tensor_descriptor_tma = True
+    # The host TMA path needs both the TensorDescriptor API *and*
+    # triton.set_allocator (used to back the descriptor workspace). triton
+    # 3.2.0 ships TensorDescriptor but not set_allocator, so gate on both —
+    # otherwise _should_enable_tma() returns True and the kernel later crashes
+    # with `module 'triton' has no attribute 'set_allocator'`.
+    tensor_descriptor_tma = hasattr(triton, "set_allocator")
 except ImportError:
     tensor_descriptor_tma = False
+
+# triton's JIT computes a kernel cache key by AST-walking the *entire* kernel
+# body (DependenciesFinder.visit_Attribute -> getattr(triton.language, attr)),
+# including statically-dead `if ENABLE_TMA:` branches. The backward kernel
+# references `tl.make_tensor_descriptor`, which triton 3.2.0 does not ship, so
+# the walk raises `AttributeError: module 'triton.language' has no attribute
+# 'make_tensor_descriptor'` even though ENABLE_TMA is False and the branch never
+# runs. Install a no-op stub so the attribute resolves; it is never invoked at
+# runtime because TMA stays disabled on this triton version. _update_hash ignores
+# non-JITFunction objects, so the stub does not perturb the cache key.
+if not hasattr(tl, "make_tensor_descriptor"):
+
+    def _unsupported_make_tensor_descriptor(*args, **kwargs):  # pragma: no cover
+        raise RuntimeError(
+            "tl.make_tensor_descriptor is unavailable in this triton version; "
+            "the device-side TMA path should be disabled (ENABLE_TMA=False)."
+        )
+
+    tl.make_tensor_descriptor = _unsupported_make_tensor_descriptor
 
 try:
     from generative_recommenders.ops.triton.fb.triton_attention_utils import acc_dq
@@ -2442,6 +2466,19 @@ def _get_bw_configs() -> List[triton.Config]:
         ]
     else:
         print("WARNING: temporarily disabled some autotune configs for CUDA 12.8+")
+    # triton 3.2.0 workaround: backward configs with BLOCK_N == 64 AND
+    # num_warps == 8 SIGABRT in LinearLayout::reshapeOuts during kernel lowering
+    # at head dim 128 (all dlrm_v3 shapes). Bisected via scripts/bisect_bw_config.py
+    # to crashing indices [7, 10, 11, 22, 23] of 28. Filtering here, at config
+    # generation, guarantees the crashing tiles never reach the autotuner
+    # regardless of how prune_configs_by is dispatched. Harmless to smaller head
+    # dims, which neither crash on nor favor these tiles. Remove once triton is
+    # upgraded past the LinearLayout fix.
+    configs = [
+        c
+        for c in configs
+        if not (c.kwargs.get("BLOCK_N", None) == 64 and c.num_warps == 8)
+    ]
     return configs
 
 
@@ -2765,12 +2802,14 @@ def triton_hstu_attention_fwd(
             block_shape=dummy_block,
         )
 
-    def alloc_fn(size: int, align: int, stream: Optional[int]):
-        assert align == TMA_DESC_SIZE
-        return torch.empty(size, dtype=torch.int8, device="cuda")
+    if tensor_descriptor_tma:
 
-    # pyre-ignore [6]
-    triton.set_allocator(alloc_fn)
+        def alloc_fn(size: int, align: int, stream: Optional[int]):
+            assert align == TMA_DESC_SIZE
+            return torch.empty(size, dtype=torch.int8, device="cuda")
+
+        # pyre-ignore [6]
+        triton.set_allocator(alloc_fn)
     grid = lambda meta: (  # noqa E731
         triton.cdiv(N, meta["BLOCK_M"]),
         Z * H,
@@ -2869,12 +2908,14 @@ def triton_hstu_attention_bwd(
     TMA_DESC_SIZE = 128
     tma_workspace = None
 
-    def alloc_fn(size: int, align: int, stream: Optional[int]):
-        assert align == TMA_DESC_SIZE
-        return torch.empty(size, dtype=torch.int8, device="cuda")
+    if tensor_descriptor_tma:
 
-    # pyre-ignore [6]
-    triton.set_allocator(alloc_fn)
+        def alloc_fn(size: int, align: int, stream: Optional[int]):
+            assert align == TMA_DESC_SIZE
+            return torch.empty(size, dtype=torch.int8, device="cuda")
+
+        # pyre-ignore [6]
+        triton.set_allocator(alloc_fn)
 
     # Enable BufferOps on AMD
     ENABLE_BUFFER_OPS_ASSUMES = torch.version.hip is not None
@@ -3169,12 +3210,14 @@ def triton_cached_hstu_mha(
             block_shape=dummy_block,
         )
 
-    def alloc_fn(size: int, align: int, stream: Optional[int]):
-        assert align == TMA_DESC_SIZE
-        return torch.empty(size, dtype=torch.int8, device="cuda")
+    if tensor_descriptor_tma:
 
-    # pyre-ignore [6]
-    triton.set_allocator(alloc_fn)
+        def alloc_fn(size: int, align: int, stream: Optional[int]):
+            assert align == TMA_DESC_SIZE
+            return torch.empty(size, dtype=torch.int8, device="cuda")
+
+        # pyre-ignore [6]
+        triton.set_allocator(alloc_fn)
     grid = lambda meta: (  # noqa E731
         triton.cdiv(DeltaSize, meta["BLOCK_M"]),
         Z * H,

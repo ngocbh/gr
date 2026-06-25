@@ -1,5 +1,5 @@
 batch_size = 16
-dataset = "kuairand-1k"
+dataset = "kuairand-27k"
 
 # model parameters
 make_model.dataset = %dataset
@@ -26,23 +26,19 @@ make_train_test_dataloaders.dataset_type = %dataset
 make_train_test_dataloaders.train_split_percentage = 0.75
 # new_path_prefix holds the dataset subfolder relative to GR_DATA_ROOT;
 # train_ranker.py joins it onto GR_DATA_ROOT at runtime.
-make_train_test_dataloaders.new_path_prefix = "KuaiRand-1K"
+make_train_test_dataloaders.new_path_prefix = "KuaiRand-27K"
 make_train_test_dataloaders.num_workers = 2
 make_train_test_dataloaders.prefetch_factor = 4
 
 # train loop variables
-train_loop.num_epochs = 5
+train_loop.num_epochs = 1
 train_loop.output_trace = True
 train_loop.metric_log_frequency = 10
 
 # train-eval loop variables (mode=train-eval): eval once per epoch
-train_eval_loop.num_epochs = 5
+train_eval_loop.num_epochs = 1
 train_eval_loop.eval_frequency = 1
 train_eval_loop.metric_log_frequency = 10
 
 # logger variables
 # tensorboard_log_path is injected from GR_EXPS_ROOT/<run_name> in train_ranker.py
-
-# checkpoint
-# save_dmp_checkpoint.path = "/home/linjianma/ckpts/kuairand_1k"
-# load_dmp_checkpoint.path = "/home/linjianma/ckpts/kuairand_1k/2025_01_12_17_56_43/"

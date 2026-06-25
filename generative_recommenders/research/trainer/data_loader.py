@@ -31,6 +31,7 @@ def create_data_loader(
     prefetch_factor: int = 128,
     num_workers: Optional[int] = os.cpu_count(),
     drop_last: bool = False,
+    persistent_workers: bool = True,
 ) -> Tuple[
     Optional[torch.utils.data.distributed.DistributedSampler[torch.utils.data.Dataset]],
     torch.utils.data.DataLoader,
@@ -46,12 +47,17 @@ def create_data_loader(
         )
     else:
         sampler = None
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
+
+    workers = num_workers or 0
+    loader_kwargs = dict(
         batch_size=batch_size,
-        # shuffle=True, cannot use with sampler
-        num_workers=num_workers or 0,
+        num_workers=workers,
         sampler=sampler,
-        prefetch_factor=prefetch_factor,
     )
+    # prefetch_factor / persistent_workers are only valid when workers > 0
+    if workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["persistent_workers"] = persistent_workers
+
+    data_loader = torch.utils.data.DataLoader(dataset, **loader_kwargs)
     return sampler, data_loader

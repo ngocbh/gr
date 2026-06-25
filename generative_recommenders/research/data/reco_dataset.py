@@ -14,6 +14,7 @@
 
 # pyre-unsafe
 
+import os
 from dataclasses import dataclass
 from typing import List
 
@@ -21,7 +22,10 @@ import pandas as pd
 import torch
 from generative_recommenders.research.data.dataset import DatasetV2, MultiFileDatasetV2
 from generative_recommenders.research.data.item_features import ItemFeatures
-from generative_recommenders.research.data.preprocessor import get_common_preprocessors
+from generative_recommenders.research.data.preprocessor import (
+    data_root,
+    get_common_preprocessors,
+)
 
 
 @dataclass
@@ -72,15 +76,16 @@ def get_reco_dataset(
         )
     elif dataset_name == "ml-3b":
         dp = get_common_preprocessors()[dataset_name]
+        ml_3b_prefix = os.path.join(data_root(), "ml-3b", "16x32")
         train_dataset = MultiFileDatasetV2(
-            file_prefix="tmp/ml-3b/16x32",
+            file_prefix=ml_3b_prefix,
             num_files=16,
             padding_length=max_sequence_length + 1,  # target
             ignore_last_n=1,
             chronological=chronological,
         )
         eval_dataset = MultiFileDatasetV2(
-            file_prefix="tmp/ml-3b/16x32",
+            file_prefix=ml_3b_prefix,
             num_files=16,
             padding_length=max_sequence_length + 1,  # target
             ignore_last_n=0,

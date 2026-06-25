@@ -30,6 +30,16 @@ import pandas as pd
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
 
+def data_root() -> str:
+    """Base directory for raw + processed datasets.
+
+    Defaults to ``tmp`` (relative to CWD) for out-of-the-box runs; set
+    ``GR_DATA_ROOT`` to point at shared storage. Read at call time so the
+    env var can be set by the launcher before any path is resolved.
+    """
+    return os.environ.get("GR_DATA_ROOT", "tmp")
+
+
 class DataProcessor:
     """
     This preprocessor does not remap item_ids. This is intended so that we can easily join other
@@ -59,7 +69,7 @@ class DataProcessor:
         pass
 
     def output_format_csv(self) -> str:
-        return f"tmp/{self._prefix}/sasrec_format.csv"
+        return os.path.join(data_root(), self._prefix, "sasrec_format.csv")
 
     def to_seq_data(
         self,
@@ -92,7 +102,7 @@ class DataProcessor:
         return ratings_data_transformed
 
     def file_exists(self, name: str) -> bool:
-        return os.path.isfile("%s/%s" % (os.getcwd(), name))
+        return os.path.isfile(name)
 
 
 class MovielensSyntheticDataProcessor(DataProcessor):
@@ -127,36 +137,40 @@ class MovielensDataProcessor(DataProcessor):
         if not self.file_exists(self._saved_name):
             urlretrieve(self._download_path, self._saved_name)
         if self._saved_name[-4:] == ".zip":
-            ZipFile(self._saved_name, "r").extractall(path="tmp/")
+            ZipFile(self._saved_name, "r").extractall(path=data_root())
         else:
             with tarfile.open(self._saved_name, "r:*") as tar_ref:
-                tar_ref.extractall("tmp/")
+                tar_ref.extractall(data_root())
 
     def processed_item_csv(self) -> str:
-        return f"tmp/processed/{self._prefix}/movies.csv"
+        return os.path.join(data_root(), "processed", self._prefix, "movies.csv")
 
     def sasrec_format_csv_by_user_train(self) -> str:
-        return f"tmp/{self._prefix}/sasrec_format_by_user_train.csv"
+        return os.path.join(
+            data_root(), self._prefix, "sasrec_format_by_user_train.csv"
+        )
 
     def sasrec_format_csv_by_user_test(self) -> str:
-        return f"tmp/{self._prefix}/sasrec_format_by_user_test.csv"
+        return os.path.join(
+            data_root(), self._prefix, "sasrec_format_by_user_test.csv"
+        )
 
     def preprocess_rating(self) -> int:
         self.download()
 
         if self._prefix == "ml-1m":
             users = pd.read_csv(
-                f"tmp/{self._prefix}/users.dat",
+                os.path.join(data_root(), self._prefix, "users.dat"),
                 sep="::",
                 names=["user_id", "sex", "age_group", "occupation", "zip_code"],
             )
             ratings = pd.read_csv(
-                f"tmp/{self._prefix}/ratings.dat",
+                os.path.join(data_root(), self._prefix, "ratings.dat"),
                 sep="::",
                 names=["user_id", "movie_id", "rating", "unix_timestamp"],
             )
             movies = pd.read_csv(
-                f"tmp/{self._prefix}/movies.dat",
+                os.path.join(data_root(), self._prefix, "movies.dat"),
                 sep="::",
                 names=["movie_id", "title", "genres"],
                 encoding="iso-8859-1",
@@ -167,7 +181,7 @@ class MovielensDataProcessor(DataProcessor):
             users = None
             # ratings: userId,movieId,rating,timestamp
             ratings = pd.read_csv(
-                f"tmp/{self._prefix}/ratings.csv",
+                os.path.join(data_root(), self._prefix, "ratings.csv"),
                 sep=",",
             )
             ratings.rename(
@@ -182,7 +196,7 @@ class MovielensDataProcessor(DataProcessor):
             # 1,Toy Story (1995),Adventure|Animation|Children|Comedy|Fantasy
             # 2,Jumanji (1995),Adventure|Children|Fantasy
             movies = pd.read_csv(
-                f"tmp/{self._prefix}/movies.csv",
+                os.path.join(data_root(), self._prefix, "movies.csv"),
                 sep=",",
                 encoding="iso-8859-1",
             )
@@ -193,7 +207,9 @@ class MovielensDataProcessor(DataProcessor):
             user_ids = []
             movie_ids = []
             for i in range(16):
-                train_file = f"tmp/{self._prefix}/trainx16x32_{i}.npz"
+                train_file = os.path.join(
+                    data_root(), self._prefix, f"trainx16x32_{i}.npz"
+                )
                 with np.load(train_file) as data:
                     user_ids.extend([x[0] for x in data["arr_0"]])
                     movie_ids.extend([x[1] for x in data["arr_0"]])
@@ -250,13 +266,14 @@ class MovielensDataProcessor(DataProcessor):
             )
 
         # Save primary csv's
-        if not os.path.exists(f"tmp/processed/{self._prefix}"):
-            os.makedirs(f"tmp/processed/{self._prefix}")
+        processed_dir = os.path.join(data_root(), "processed", self._prefix)
+        if not os.path.exists(processed_dir):
+            os.makedirs(processed_dir)
         if users is not None:
-            users.to_csv(f"tmp/processed/{self._prefix}/users.csv", index=False)
+            users.to_csv(os.path.join(processed_dir, "users.csv"), index=False)
         if movies is not None:
-            movies.to_csv(f"tmp/processed/{self._prefix}/movies.csv", index=False)
-        ratings.to_csv(f"tmp/processed/{self._prefix}/ratings.csv", index=False)
+            movies.to_csv(os.path.join(processed_dir, "movies.csv"), index=False)
+        ratings.to_csv(os.path.join(processed_dir, "ratings.csv"), index=False)
 
         num_unique_users = len(set(ratings["user_id"].values))
         num_unique_items = len(set(ratings["movie_id"].values))
@@ -413,8 +430,8 @@ class AmazonDataProcessor(DataProcessor):
         print(self._prefix)
         print(result)
 
-        if not os.path.exists(f"tmp/{self._prefix}"):
-            os.makedirs(f"tmp/{self._prefix}")
+        if not os.path.exists(os.path.join(data_root(), self._prefix)):
+            os.makedirs(os.path.join(data_root(), self._prefix))
 
         seq_ratings_data = self.to_seq_data(seq_ratings_data)
         seq_ratings_data.sample(frac=1).reset_index().to_csv(
@@ -436,7 +453,7 @@ def get_common_preprocessors() -> Dict[
 ]:
     ml_1m_dp = MovielensDataProcessor(  # pyre-ignore [45]
         "http://files.grouplens.org/datasets/movielens/ml-1m.zip",
-        "tmp/movielens1m.zip",
+        os.path.join(data_root(), "movielens1m.zip"),
         prefix="ml-1m",
         convert_timestamp=False,
         expected_num_unique_items=3706,
@@ -444,7 +461,7 @@ def get_common_preprocessors() -> Dict[
     )
     ml_20m_dp = MovielensDataProcessor(  # pyre-ignore [45]
         "http://files.grouplens.org/datasets/movielens/ml-20m.zip",
-        "tmp/movielens20m.zip",
+        os.path.join(data_root(), "movielens20m.zip"),
         prefix="ml-20m",
         convert_timestamp=False,
         expected_num_unique_items=26744,
@@ -452,7 +469,7 @@ def get_common_preprocessors() -> Dict[
     )
     ml_1b_dp = MovielensDataProcessor(  # pyre-ignore [45]
         "https://files.grouplens.org/datasets/movielens/ml-20mx16x32.tar",
-        "tmp/movielens1b.tar",
+        os.path.join(data_root(), "movielens1b.tar"),
         prefix="ml-20mx16x32",
         convert_timestamp=False,
     )
@@ -463,7 +480,7 @@ def get_common_preprocessors() -> Dict[
     )
     amzn_books_dp = AmazonDataProcessor(  # pyre-ignore [45]
         "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/ratings_Books.csv",
-        "tmp/ratings_Books.csv",
+        os.path.join(data_root(), "ratings_Books.csv"),
         prefix="amzn_books",
         expected_num_unique_items=695762,
     )

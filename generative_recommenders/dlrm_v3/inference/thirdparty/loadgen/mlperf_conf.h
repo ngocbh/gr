@@ -163,5 +163,4 @@ const char* mlperf_conf =
 "*.MultiStream.target_latency = 80\n"
 "*.Server.target_qps = 1.0\n"
 "*.Offline.target_qps = 1.0\n"
-"\n"
 "";

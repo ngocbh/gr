@@ -18,10 +18,13 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 import os
+import random
 import sys
 import traceback
+from datetime import datetime
 
 import gin
+import numpy as np
 import torch
 from generative_recommenders.dlrm_v3.checkpoint import load_dmp_checkpoint
 from generative_recommenders.dlrm_v3.train.utils import (
@@ -45,6 +48,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 SUPPORTED_CONFIGS = {
     "debug": "debug.gin",
     "kuairand-1k": "kuairand_1k.gin",
+    "kuairand-27k": "kuairand_27k.gin",
     "movielens-1m": "movielens_1m.gin",
     "movielens-20m": "movielens_20m.gin",
     "movielens-13b": "movielens_13b.gin",
@@ -55,12 +59,71 @@ SUPPORTED_CONFIGS = {
 }
 
 
+def _set_global_seed(seed: int) -> None:
+    """Seed all RNGs for reproducible model init / dropout / data order.
+
+    The same seed is set on every rank: DDP broadcasts rank-0 params at wrap
+    time, and ChunkDistributedSampler adds its own per-rank offset, so identical
+    global seeding across ranks is correct.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def _bind_env_paths(run_name: str) -> None:
+    """Bind data/checkpoint/exp roots from .env onto gin-configurable targets.
+
+    Gin configs hold only relative parts (per-dataset subpaths live in
+    get_dataset; run_name is the per-run leaf). The absolute roots come from
+    the environment (GR_DATA_ROOT / GR_CKPTS_ROOT / GR_EXPS_ROOT) so nothing
+    machine-specific is committed to gin.
+    """
+    data_root = os.environ.get("GR_DATA_ROOT")
+    if data_root:
+        # gin may hold a relative dataset subfolder (e.g. "KuaiRand-1K"); join it
+        # onto the absolute GR_DATA_ROOT. If the config leaves new_path_prefix
+        # unset, fall back to the root alone (ml-1m/ml-20m bake their per-dataset
+        # subpath into get_dataset instead).
+        try:
+            rel_prefix = gin.query_parameter(
+                "make_train_test_dataloaders.new_path_prefix"
+            )
+        except ValueError:
+            rel_prefix = None
+        full_prefix = (
+            os.path.join(data_root, rel_prefix) if rel_prefix else data_root
+        )
+        gin.bind_parameter(
+            "make_train_test_dataloaders.new_path_prefix", full_prefix
+        )
+
+    exps_root = os.environ.get("GR_EXPS_ROOT")
+    if exps_root:
+        gin.bind_parameter(
+            "MetricsLogger.tensorboard_log_path",
+            os.path.join(exps_root, run_name),
+        )
+
+    ckpts_root = os.environ.get("GR_CKPTS_ROOT")
+    if ckpts_root:
+        gin.bind_parameter(
+            "save_dmp_checkpoint.path", os.path.join(ckpts_root, run_name)
+        )
+
+
 def _main_func(
     rank: int,
     world_size: int,
     master_port: int,
     gin_file: str,
     mode: str,
+    seed: int,
+    num_epochs: int,
+    run_name: str,
+    max_seq_len: int,
+    max_attn_len: int,
 ) -> None:
     device = torch.device(f"cuda:{rank}")
     logger.info(f"rank: {rank}, world_size: {world_size}, device: {device}")
@@ -72,6 +135,21 @@ def _main_func(
     )
     # parse all arguments
     gin.parse_config_file(gin_file)
+
+    # Env-driven roots + per-run overrides take precedence over gin defaults.
+    _set_global_seed(seed)
+    _bind_env_paths(run_name)
+    gin.bind_parameter("make_train_test_dataloaders.seed", seed)
+    if os.environ.get("GR_WANDB_ENABLED", "0") == "1":
+        gin.bind_parameter("MetricsLogger.wandb_enabled", True)
+        gin.bind_parameter("MetricsLogger.wandb_run_name", run_name)
+    if num_epochs > 0:
+        gin.bind_parameter("train_loop.num_epochs", num_epochs)
+        gin.bind_parameter("train_eval_loop.num_epochs", num_epochs)
+    if max_seq_len > 0:
+        gin.bind_parameter("make_model.max_seq_len", max_seq_len)
+    if max_attn_len > 0:
+        gin.bind_parameter("make_model.max_attn_len", max_attn_len)
 
     model, model_configs, embedding_table_configs = make_model()
     model, optimizer = make_optimizer_and_shard(
@@ -157,6 +235,32 @@ def get_args():  # pyre-ignore [3]
         choices=["train", "eval", "train-eval", "streaming-train-eval"],
         help="mode",
     )
+    parser.add_argument(
+        "--seed", type=int, default=1, help="global + sampler seed for reproducibility"
+    )
+    parser.add_argument(
+        "--num-epochs",
+        type=int,
+        default=0,
+        help="override num_epochs for train/train-eval loops; 0 = use gin value",
+    )
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        help="leaf name for exp/checkpoint dirs and wandb run; auto-generated if unset",
+    )
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=0,
+        help="override model max_seq_len (HSTU max sequence length); 0 = use config default",
+    )
+    parser.add_argument(
+        "--max-attn-len",
+        type=int,
+        default=0,
+        help="sliding-window attention span (each token attends to prev N tokens); 0 = full causal attention",
+    )
     args, unknown_args = parser.parse_known_args()
     logger.warning(f"unknown_args: {unknown_args}")
     return args
@@ -176,9 +280,25 @@ def main() -> None:
     MASTER_PORT = str(get_free_port())
     gin_path = f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[args.dataset]}"
 
+    # Generate run_name once in the parent so all ranks share identical paths.
+    run_name = args.run_name or (
+        f"{args.dataset}_seed{args.seed}_{datetime.now():%Y%m%d_%H%M%S}"
+    )
+    logger.info(f"run_name: {run_name}")
+
     mp.start_processes(
         _main_func,
-        args=(WORLD_SIZE, MASTER_PORT, gin_path, args.mode),
+        args=(
+            WORLD_SIZE,
+            MASTER_PORT,
+            gin_path,
+            args.mode,
+            args.seed,
+            args.num_epochs,
+            run_name,
+            args.max_seq_len,
+            args.max_attn_len,
+        ),
         nprocs=WORLD_SIZE,
         join=True,
         start_method="spawn",

@@ -5,93 +5,82 @@
 namespace mlperf {
 
 const std::string& LoadgenVersion() {
-  static const std::string str = "4.1";
+  static const std::string str = "5.1.1";
   return str;
 }
 
 const std::string& LoadgenBuildDateLocal() {
-  static const std::string str = "2024-10-18T23:12:51.002440";
+  static const std::string str = "2026-06-24T05:14:10.805132";
   return str;
 }
 
 const std::string& LoadgenBuildDateUtc() {
-  static const std::string str = "2024-10-19T06:12:51.002446";
+  static const std::string str = "2026-06-24T05:14:10.805140";
   return str;
 }
 
 const std::string& LoadgenGitRevision() {
-  static const std::string str = "f5c8f17583";
+  static const std::string str = "NA";
   return str;
 }
 
 const std::string& LoadgenGitCommitDate() {
-  static const std::string str = "2024-10-08T18:30:16+01:00";
+  static const std::string str = "NA";
   return str;
 }
 
 const std::string& LoadgenGitStatus() {
-  static const std::string str = R"LGVG_RSLD()LGVG_RSLD";
+  static const std::string str = "NA";
   return str;
 }
 
 const std::string& LoadgenGitLog() {
-  static const std::string str = R"LGVG_RSLD(f5c8f1758374aeaba26b2e84d31690111cfdf054 Fix bug: Loadgen ignoring token latency targets in user conf (#1874)
-976bb1ad9c7946be79507f3ff67955c27426af52 Set correct remote repo (#1871)
-41fa8aadd1ba0ecc97f6a519d8b42b04278e5f24 Add format files github action (#1682)
-518b454fd8647bfbd23a074e875e87353f33393e Tflite tpu (#1449)
-e0fdec1c7a75c98cfc194f13d62ac4388d419c8a Fix link in GettingStarted.ipynb (#1512)
-92bd8198d15411d7fb7d7c27f8904bc5a0bcfe7a Fix warning in the submission checker (#1808)
-224cfbf5c0e82cae6d48620025b7e1258ae3666a Fix typo in reference datatype (#1851)
-3ef1249b7f50a250c02c568342e0aea6638fc5a7 Fix docs (#1853)
-a0874c100c54cbc54fb743ac8bf9fb5fadc64135 Update build_wheels.yml (#1758)
-6eff09986e337ccf03f675c9f244d8ee93644e16 Extend the final report generation script to output a json file of results (#1825)
-54f3f93a73cc8ca5e3319ad87fb325e510574f56 Add binding for server_num_issue_query_threads parameter (#1862)
-c4d0b3ea98e6fe7252e50cb573f0d523da7979df Update docs: SCC24,  fix broken redirect  (#1843)
-7d2f0c41e5cd79c9178702867392e38f57953338 Update DLRM readme (#1811)
-cf5fddc5d0746bf3820eb0ab7294bbf709d788ab Enable systems to be marked as power only (#1850)
-81c2de69de4af90410cd1ba000fc5bd731bf6dee Documentation updates (#1821)
-73b02798219c794a735a7f2ddabbc3df9173352d Fix error with generate_final_report.py when the input CSV file is empty (#1827))LGVG_RSLD";
+  static const std::string str = "NA";
   return str;
 }
 
 const std::string& LoadgenSha1OfFiles() {
   static const std::string str = R"LGVG_RSLD(012aad77e5206c89d50718c46c119d1f3cb056b2 /.clang-format
-e173f4513f3c5dac1f0bea1473bb0a058e23f190 /=42
-d5274ff0b56e8d3cdb273174628a4461fca6f02a /CMakeLists.txt
-20a55bb946c2c0bbb564ced2af1e48efd096b3a8 /README.md
+a8ebd64f62d0349aeedbe3295d833ebdce625c2e /CMakeLists.txt
+ddeb472d62edf2920db1f8fa3beebe3e831557f1 /MANIFEST.in
+e850133bdbbfa62c84bc05a7358114d8996e0530 /README.md
 5f6c6a784e9cd6995db47f9b9f70b1769909c9d8 /README_BUILD.md
 01f9ae9887f50bc030dc6107e740f40c43ca388f /README_FAQ.md
-32181da9e161c285f8fe46ddaa49e6cba2f9f918 /bindings/c_api.cc
-91f58bd79b83b278f3240174a9af747fc38aff74 /bindings/c_api.h
-ea4c89decad19eaf3217bfa2fb757d3b83a561d6 /bindings/python_api.cc
+cda9912abf9a64ac7c18f201a4119cdb96f07104 /VERSION.txt
+d013101621ef06a0ddc5e7d9ce511918a8b2ebe6 /__init__.py
+14d178b64c7fc45d090e038c08d9b78ca943c383 /bindings/c_api.cc
+23d9f99e00b2d196e095fae0bb453a391c18d601 /bindings/c_api.h
+4dae966c92acdaa373b04a95adc4ca353937f154 /bindings/python_api.cc
 53dba8ad4272190ceb6335c12fd25e53dc02a8cb /diagram_network_submission.png
 84c2f79309b237cef652aef6a187ba8e875a3952 /diagram_submission.png
 0cd7b546a389deac73f7955cd39255ed76557d62 /early_stopping.cc
 158fcae6a5f47e82150d6416fa1f7bcef37e77fe /early_stopping.h
-126e952d00f4ea9efd12405fb209aa3ed585e4b2 /issue_query_controller.cc
-923d9d5cdf598e3ec33d7a1110a31f7e11527ec7 /issue_query_controller.h
-6650091ba7a918f343b06eb7a5aa540eae87275f /loadgen.cc
-e00fdc6dbc85a8c9a8485dbcbfe2944f81251c4e /loadgen.h
+02fcfe6d9cf958eeb4b6f1f4dbe87ba7eb4d7dec /issue_query_controller.cc
+ed20934fd3507a15949d501ac154be38e766f6ab /issue_query_controller.h
+6daa9cd51454a699fcb55d9aa6bf9e54dd7b7a97 /loadgen.cc
+ce9fcb5d44951e7e9048a83b7c1a41c8b8e0f7d8 /loadgen.h
 47f748307536f80cfc606947b440dd732afc2637 /loadgen_integration_diagram.svg
-197efc96d178e5d33a750d07fa7b2966417506ea /logging.cc
-ddb961df7bcc145bcd7cce8c21f7cf075350dcbe /logging.h
-ca17720f9c8246e821331946d893e830fc88f8bd /pyproject.toml
-13ad6d842200cb161d6927eb74a3fafd79c46c75 /query_dispatch_library.h
-e9187c8612bbdc972305b789feb6e15c26e96cfe /query_sample.h
+49e63158ebca654fa4b7c5f3321054cf4d6c3a30 /logging.cc
+2102c91dedbaa156beadf0cecc63d2f43a2bd7dd /logging.h
+995a5e32f4e87da6ac0848cbdd8369e4ee4f321f /mlperf.conf
+1cd5c9510eb0593e2721a3f3383e2e9d8a74d7ec /mlperf_conf.h
+712fab87b72ba67ef2a068d0f9f47da65130342f /pyproject.toml
+1f18e9cd3ee4dc89a387cf462de1d0ceb1ece975 /query_dispatch_library.h
+c4f399103bc3d172079bbd4cd2b0ca0f22eebc4f /query_sample.h
 8323a2225be1dff31f08ecc86b76eb3de06568bc /query_sample_library.h
 a5ff7e77caa6e9e22ada90f0de0c865c987bf167 /requirements.txt
-34e2d2a44324cb07c884f92146ecbb8ef9d704e2 /results.cc
-d82500c326c2de83db411f1146882aa4692b419c /results.h
-13c49b028b22749b5f3c44f3d9bb489e8c0574e9 /setup.py
+fde4e173d3ec8461dd439ff0d8e605b52c4becf5 /results.cc
+fce22d5a588d91fd968a6b25c27896dba87bc276 /results.h
+a5eaa6f713bd3dfb6603be2c7928f0c295d7ee30 /setup.py
 18d4809589dae33317d88d9beeb5491a6e1ccdec /system_under_test.h
-c15c3e150030089a8d634bd2ad6d4b644002e613 /test_settings.h
-e21febd60f9b5bedd1fc81bb990f09c34b32043c /test_settings_internal.cc
-f1d5335b53ca610c30e0edc5d07999a27b5b4b9a /test_settings_internal.h
+8e05582d1fbe9dd2b809686684c3a0ac41248723 /test_settings.h
+a5cc85fb7735727eee032aa3e88b5d61c1f11a2a /test_settings_internal.cc
+2bb9e9ae53904cb0ca221f4a5d49ca7d9ec3b0ca /test_settings_internal.h
 3df8fdabf6eaea4697cf25d1dcb89cae88e36efd /utils.cc
 40775e32d619ea6356826ae5ea4174c7911f6894 /utils.h
 cbec2a5f98f9786c8c3d8b06b3d12df0b6550fa0 /version.cc
 9d574baa64424e9c708fcfedd3dbb0b518a65fcc /version.h
-eea9b9cb1a06cd1abe1bbdaee82f9af31527fedb /version_generator.py)LGVG_RSLD";
+9f23d13276194588473120a8a6ecf5a6ed034a23 /version_generator.py)LGVG_RSLD";
   return str;
 }
 

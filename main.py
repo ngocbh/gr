@@ -42,9 +42,14 @@ def delete_flags(FLAGS, keys_to_delete: List[str]) -> None:  # pyre-ignore [2]
             delattr(FLAGS, key)
 
 
-delete_flags(flags.FLAGS, ["gin_config_file", "master_port"])
+delete_flags(flags.FLAGS, ["gin_config_file", "master_port", "gin_bindings"])
 flags.DEFINE_string("gin_config_file", None, "Path to the config file.")
 flags.DEFINE_integer("master_port", 12355, "Master port.")
+flags.DEFINE_multi_string(
+    "gin_bindings",
+    [],
+    "Additional gin parameter bindings, e.g. --gin_bindings=train_fn.wandb_enabled=True",
+)
 FLAGS = flags.FLAGS  # pyre-ignore [5]
 
 
@@ -53,11 +58,15 @@ def mp_train_fn(
     world_size: int,
     master_port: int,
     gin_config_file: Optional[str],
+    gin_bindings: Optional[List[str]] = None,
 ) -> None:
     if gin_config_file is not None:
         # Hack as absl doesn't support flag parsing inside multiprocessing.
         logging.info(f"Rank {rank}: loading gin config from {gin_config_file}")
         gin.parse_config_file(gin_config_file)
+    if gin_bindings:
+        logging.info(f"Rank {rank}: applying gin bindings: {gin_bindings}")
+        gin.parse_config(gin_bindings)
 
     train_fn(rank, world_size, master_port)
 
@@ -68,7 +77,7 @@ def _main(argv) -> None:  # pyre-ignore [2]
     mp.set_start_method("forkserver")
     mp.spawn(
         mp_train_fn,
-        args=(world_size, FLAGS.master_port, FLAGS.gin_config_file),
+        args=(world_size, FLAGS.master_port, FLAGS.gin_config_file, list(FLAGS.gin_bindings)),
         nprocs=world_size,
         join=True,
     )

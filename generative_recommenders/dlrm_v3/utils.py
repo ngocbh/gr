@@ -47,6 +47,11 @@ from torchrec.metrics.mse import MSEMetricComputation
 from torchrec.metrics.ne import NEMetricComputation
 from torchrec.metrics.rec_metric import RecMetricComputation
 
+try:
+    import wandb  # type: ignore
+except ImportError:  # pragma: no cover - optional dep
+    wandb = None  # type: ignore
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("utils")
 
@@ -169,6 +174,12 @@ class MetricsLogger:
         device: torch.device,
         rank: int,
         tensorboard_log_path: str = "",
+        wandb_enabled: bool = False,
+        wandb_project: Optional[str] = None,
+        wandb_entity: Optional[str] = None,
+        wandb_run_name: Optional[str] = None,
+        wandb_mode: Optional[str] = None,
+        wandb_config: Optional[Dict] = None,
     ) -> None:
         self.multitask_configs: List[TaskConfig] = multitask_configs
         all_classification_tasks: List[str] = [
@@ -245,6 +256,28 @@ class MetricsLogger:
         if tensorboard_log_path != "":
             self.tb_logger = SummaryWriter(log_dir=tensorboard_log_path, purge_step=0)
             self.tb_logger.flush()
+
+        self.wandb_run = None
+        # Only rank 0 owns the wandb run to avoid duplicate logging in DDP.
+        if wandb_enabled and rank == 0:
+            if wandb is None:
+                logger.warning(
+                    "wandb_enabled=True but wandb is not installed; skipping."
+                )
+            else:
+                self.wandb_run = wandb.init(
+                    project=wandb_project
+                    or os.environ.get("WANDB_PROJECT", "generative-recommenders-dlrmv3"),
+                    entity=wandb_entity or os.environ.get("WANDB_ENTITY"),
+                    name=wandb_run_name,
+                    mode=wandb_mode or os.environ.get("WANDB_MODE", "online"),
+                    dir=tensorboard_log_path or None,
+                    config=wandb_config or {},
+                )
+                logger.info(
+                    f"wandb run initialized: "
+                    f"{self.wandb_run.url if self.wandb_run else None}"
+                )
 
     @property
     def all_metrics(self) -> Dict[str, List[RecMetricComputation]]:
@@ -333,27 +366,41 @@ class MetricsLogger:
 
         Returns:
             Dictionary mapping metric names to their computed values.
-
-        Raises:
-            AssertionError: If TensorBoard logger is not configured.
         """
-        assert self.tb_logger is not None
         all_computed_metrics = self.compute(mode)
+        wandb_payload: Dict[str, float] = {}
         for k, v in all_computed_metrics.items():
-            self.tb_logger.add_scalar(  # pyre-ignore [16]
-                f"{mode}_{k}",
-                v,
-                global_step=self.global_step[mode],
-            )
+            if self.tb_logger is not None:
+                self.tb_logger.add_scalar(  # pyre-ignore [16]
+                    f"{mode}_{k}",
+                    v,
+                    global_step=self.global_step[mode],
+                )
+            wandb_payload[f"{mode}_{k}"] = float(v)
 
         if additional_logs is not None:
             for tag, data in additional_logs.items():
                 for data_name, data_value in data.items():
-                    self.tb_logger.add_scalar(
-                        f"{tag}/{mode}_{data_name}",
-                        data_value.detach().clone().cpu(),
-                        global_step=self.global_step[mode],
-                    )
+                    scalar = data_value.detach().clone().cpu()
+                    if self.tb_logger is not None:
+                        self.tb_logger.add_scalar(
+                            f"{tag}/{mode}_{data_name}",
+                            scalar,
+                            global_step=self.global_step[mode],
+                        )
+                    wandb_payload[f"{tag}/{mode}_{data_name}"] = float(scalar)
+
+        if self.wandb_run is not None and wandb_payload:
+            # wandb requires one monotonically increasing step per run, but train
+            # and eval keep separate counters (global_step["eval"] lags "train").
+            # Rule: the wandb x-axis is the training step. train_* and eval_* keys
+            # are distinct, so logging eval at the current training step plots each
+            # eval point at "train batches seen so far" — monotonic across epochs.
+            # In an eval-only run no training happens, so fall back to the eval
+            # step (its own monotonic counter) to avoid collapsing onto step 0.
+            wandb_step = self.global_step["train"] or self.global_step["eval"]
+            self.wandb_run.log(wandb_payload, step=wandb_step)
+
         return all_computed_metrics
 
     def reset(self, mode: str = "train"):
@@ -366,6 +413,20 @@ class MetricsLogger:
         for metric in self.all_metrics[mode]:
             metric.reset()
 
+    def finish(self) -> None:
+        """Release tensorboard / wandb resources."""
+        if self.tb_logger is not None:
+            try:
+                self.tb_logger.flush()
+                self.tb_logger.close()
+            except Exception:
+                pass
+        if self.wandb_run is not None:
+            try:
+                self.wandb_run.finish()
+            except Exception:
+                pass
+
 
 # the datasets we support
 SUPPORTED_DATASETS = [
@@ -375,6 +436,7 @@ SUPPORTED_DATASETS = [
     "movielens-13b",
     "movielens-18b",
     "kuairand-1k",
+    "kuairand-27k",
     "streaming-400m",
     "streaming-200b",
     "streaming-100b",
@@ -441,7 +503,16 @@ def get_dataset(name: str, new_path_prefix: str = ""):
             DLRMv3KuaiRandDataset,
             {
                 "seq_logs_file": os.path.join(
-                    new_path_prefix, "data/KuaiRand-1K/data/processed_seqs.csv"
+                    new_path_prefix, "data/processed_seqs.csv"
+                ),
+            },
+        )
+    if name == "kuairand-27k":
+        return (
+            DLRMv3KuaiRandDataset,
+            {
+                "seq_logs_file": os.path.join(
+                    new_path_prefix, "data/processed_seqs.csv"
                 ),
             },
         )

@@ -24,6 +24,12 @@ from typing import Dict, Optional
 import gin
 import torch
 import torch.distributed as dist
+
+try:
+    import wandb  # type: ignore
+except ImportError:  # pragma: no cover - optional dep
+    wandb = None  # type: ignore
+
 from generative_recommenders.research.data.eval import (
     _avg,
     add_to_summary_writer,
@@ -128,6 +134,12 @@ def train_fn(
     l2_norm_eps: float = 1e-6,
     enable_tf32: bool = False,
     random_seed: int = 42,
+    wandb_enabled: bool = False,
+    wandb_project: Optional[str] = None,
+    wandb_entity: Optional[str] = None,
+    wandb_run_name: Optional[str] = None,
+    wandb_tags: Optional[list] = None,
+    wandb_mode: Optional[str] = None,
 ) -> None:
     # to enable more deterministic results.
     random.seed(random_seed)
@@ -283,14 +295,64 @@ def train_fn(
     if positional_sampling_ratio is not None and positional_sampling_ratio < 1:
         model_desc += f"-d{positional_sampling_ratio}"
     # creates subfolders.
-    os.makedirs(f"./exps/{model_subfolder}", exist_ok=True)
-    os.makedirs(f"./ckpts/{model_subfolder}", exist_ok=True)
-    log_dir = f"./exps/{model_desc}"
+    exps_root = os.environ.get("GR_EXPS_ROOT", "./exps")
+    ckpts_root = os.environ.get("GR_CKPTS_ROOT", "./ckpts")
+
+    def _maybe_makedirs(p: str) -> None:
+        # Skip remote URIs (e.g. manifold://) — SummaryWriter handles them directly.
+        if "://" in p:
+            return
+        os.makedirs(p, exist_ok=True)
+
+    _maybe_makedirs(f"{exps_root}/{model_subfolder}")
+    _maybe_makedirs(f"{ckpts_root}/{model_subfolder}")
+    log_dir = f"{exps_root}/{model_desc}"
+    ckpt_prefix = f"{ckpts_root}/{model_desc}"
     if rank == 0:
         writer = SummaryWriter(log_dir=log_dir)
         logging.info(f"Rank {rank}: writing logs to {log_dir}")
+        if wandb_enabled:
+            if wandb is None:
+                logging.warning("wandb_enabled=True but wandb is not installed; skipping.")
+                _wandb_run = None
+            else:
+                _wandb_run = wandb.init(
+                    project=wandb_project or os.environ.get("WANDB_PROJECT", "generative-recommenders"),
+                    entity=wandb_entity or os.environ.get("WANDB_ENTITY"),
+                    name=wandb_run_name or model_desc.replace("/", "__"),
+                    tags=wandb_tags,
+                    mode=wandb_mode or os.environ.get("WANDB_MODE", "online"),
+                    dir=log_dir,
+                    config={
+                        "dataset_name": dataset_name,
+                        "max_sequence_length": max_sequence_length,
+                        "local_batch_size": local_batch_size,
+                        "eval_batch_size": eval_batch_size,
+                        "main_module": main_module,
+                        "main_module_bf16": main_module_bf16,
+                        "dropout_rate": dropout_rate,
+                        "user_embedding_norm": user_embedding_norm,
+                        "sampling_strategy": sampling_strategy,
+                        "loss_module": loss_module,
+                        "num_negatives": num_negatives,
+                        "temperature": temperature,
+                        "num_epochs": num_epochs,
+                        "learning_rate": learning_rate,
+                        "num_warmup_steps": num_warmup_steps,
+                        "weight_decay": weight_decay,
+                        "item_embedding_dim": item_embedding_dim,
+                        "interaction_module_type": interaction_module_type,
+                        "world_size": world_size,
+                        "random_seed": random_seed,
+                        "model_desc": model_desc,
+                    },
+                )
+                logging.info(f"Rank {rank}: wandb run initialized: {_wandb_run.url if _wandb_run else None}")
+        else:
+            _wandb_run = None
     else:
         writer = None
+        _wandb_run = None
         logging.info(f"Rank {rank}: disabling summary writer")
 
     last_training_time = time.time()
@@ -351,14 +413,33 @@ def train_fn(
                     prefix="eval",
                     world_size=world_size,
                 )
+                # _avg issues a dist.all_reduce, so every rank must call it the
+                # same number of times in the same order. Compute the averages
+                # once on ALL ranks here; logging.info and the rank-0-only
+                # wandb.log below then reference these precomputed scalars.
+                # (Calling _avg inside the rank-0 guard desyncs DDP and hangs.)
+                # pyrefly: ignore [bad-index]
+                eval_ndcg10 = _avg(eval_dict["ndcg@10"], world_size)
+                eval_hr10 = _avg(eval_dict["hr@10"], world_size)  # pyrefly: ignore [bad-index]
+                eval_hr50 = _avg(eval_dict["hr@50"], world_size)  # pyrefly: ignore [bad-index]
+                eval_mrr = _avg(eval_dict["mrr"], world_size)  # pyrefly: ignore [bad-index]
                 logging.info(
                     f"rank {rank}:  batch-stat (eval): iter {batch_id} (epoch {epoch}): "
-                    # pyrefly: ignore [bad-index]
-                    + f"NDCG@10 {_avg(eval_dict['ndcg@10'], world_size):.4f}, "
-                    f"HR@10 {_avg(eval_dict['hr@10'], world_size):.4f}, "
-                    f"HR@50 {_avg(eval_dict['hr@50'], world_size):.4f}, "
-                    + f"MRR {_avg(eval_dict['mrr'], world_size):.4f} "  # pyrefly: ignore [bad-index]
+                    + f"NDCG@10 {eval_ndcg10:.4f}, "
+                    f"HR@10 {eval_hr10:.4f}, "
+                    f"HR@50 {eval_hr50:.4f}, "
+                    + f"MRR {eval_mrr:.4f} "
                 )
+                if rank == 0 and _wandb_run is not None:
+                    _wandb_run.log(
+                        {
+                            "eval/ndcg@10": eval_ndcg10,
+                            "eval/hr@10": eval_hr10,
+                            "eval/hr@50": eval_hr50,
+                            "eval/mrr": eval_mrr,
+                        },
+                        step=batch_id,
+                    )
                 model.train()
 
             # TODO: consider separating this out?
@@ -411,6 +492,14 @@ def train_fn(
                 assert writer is not None
                 writer.add_scalar("losses/ar_loss", loss, batch_id)
                 writer.add_scalar("losses/main_loss", main_loss, batch_id)
+                if _wandb_run is not None:
+                    _wandb_run.log(
+                        {
+                            "losses/ar_loss": float(loss.detach()),
+                            "losses/main_loss": float(main_loss.detach()),
+                        },
+                        step=batch_id,
+                    )
 
             loss.backward()
 
@@ -433,6 +522,11 @@ def train_fn(
                     assert writer is not None
                     writer.add_scalar("loss/train", loss, batch_id)
                     writer.add_scalar("lr", lr, batch_id)
+                    if _wandb_run is not None:
+                        _wandb_run.log(
+                            {"loss/train": float(loss.detach()), "lr": lr},
+                            step=batch_id,
+                        )
 
             opt.step()
 
@@ -535,13 +629,25 @@ def train_fn(
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": opt.state_dict(),
                 },
-                f"./ckpts/{model_desc}_ep{epoch}",
+                f"{ckpt_prefix}_ep{epoch}",
             )
 
         logging.info(
             f"rank {rank}: eval @ epoch {epoch} in {time.time() - eval_start_time:.2f}s: "
             f"NDCG@10 {ndcg_10:.4f}, NDCG@50 {ndcg_50:.4f}, HR@10 {hr_10:.4f}, HR@50 {hr_50:.4f}, MRR {mrr:.4f}"
         )
+        if rank == 0 and _wandb_run is not None:
+            _wandb_run.log(
+                {
+                    "eval_epoch/ndcg@10": ndcg_10,
+                    "eval_epoch/ndcg@50": ndcg_50,
+                    "eval_epoch/hr@10": hr_10,
+                    "eval_epoch/hr@50": hr_50,
+                    "eval_epoch/mrr": mrr,
+                    "epoch": epoch,
+                },
+                step=batch_id,
+            )
         last_training_time = time.time()
 
     if rank == 0:
@@ -555,7 +661,9 @@ def train_fn(
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": opt.state_dict(),
             },
-            f"./ckpts/{model_desc}_ep{epoch}",
+            f"{ckpt_prefix}_ep{epoch}",
         )
+        if _wandb_run is not None:
+            _wandb_run.finish()
 
     cleanup()

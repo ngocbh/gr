@@ -168,8 +168,14 @@ class ChunkDistributedSampler(DistributedSampler[_T_co]):
 @gin.configurable
 def make_model(
     dataset: str,
+    max_seq_len: Optional[int] = None,
+    max_attn_len: Optional[int] = None,
 ) -> Tuple[torch.nn.Module, DlrmHSTUConfig, Dict[str, EmbeddingConfig]]:
     hstu_config = get_hstu_configs(dataset)
+    if max_seq_len is not None:
+        hstu_config.max_seq_len = max_seq_len
+    if max_attn_len is not None:
+        hstu_config.max_attn_len = max_attn_len
     table_config = get_embedding_table_config(dataset)
 
     model = DlrmHSTU(
@@ -369,6 +375,7 @@ def make_train_test_dataloaders(
     num_workers: int = 0,
     num_blocks: int = 1,
     prefetch_factor: Optional[int] = None,
+    seed: int = 1,
 ) -> Tuple[DataLoader, DataLoader]:
     dataset_class, kwargs = get_dataset(
         name=dataset_type, new_path_prefix=new_path_prefix
@@ -402,7 +409,9 @@ def make_train_test_dataloaders(
         drop_last=True,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
-        sampler=ChunkDistributedSampler(train_set, drop_last=True, shuffle=True),
+        sampler=ChunkDistributedSampler(
+            train_set, drop_last=True, shuffle=True, seed=seed
+        ),
     )
     test_dataloader = DataLoader(
         dataset=test_set,
@@ -412,7 +421,9 @@ def make_train_test_dataloaders(
         drop_last=True,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
-        sampler=ChunkDistributedSampler(test_set, drop_last=True, shuffle=True),
+        sampler=ChunkDistributedSampler(
+            test_set, drop_last=True, shuffle=True, seed=seed
+        ),
     )
     return train_dataloader, test_dataloader
 
@@ -563,23 +574,13 @@ def train_eval_loop(
     # lr_scheduler: to-do: Add a scheduler
 ) -> None:
     train_batch_idx: int = start_train_batch_idx
-    eval_batch_idx: int = start_eval_batch_idx
     profiler = Profiler(rank, active=10) if output_trace else None
     assert train_dataloader is not None and eval_dataloader is not None
-    eval_data_iterator = iter(eval_dataloader)
-    train_data_iterator = iter(train_dataloader)
-    # metric_logger.reset(mode="train")
-    # metric_logger.reset(mode="eval")
 
     for epoch in range(num_epochs):
         train_dataloader.sampler.set_epoch(epoch)  # pyre-ignore [16]
-        while True:
-            model.train()
-            try:
-                sample = next(train_data_iterator)
-            except StopIteration:
-                train_data_iterator = iter(train_dataloader)
-                break
+        model.train()
+        for sample in train_dataloader:
             optimizer.zero_grad()
             sample.to(device)
             (
@@ -624,53 +625,50 @@ def train_eval_loop(
             if output_trace:
                 assert profiler is not None
                 profiler.step()
-            if train_batch_idx % eval_frequency == 0:
-                model.eval()
-                eval_batch_idx: int = 0
-                with torch.no_grad():
-                    while True:
-                        try:
-                            sample = next(eval_data_iterator)
-                        except StopIteration:
-                            eval_data_iterator = iter(eval_dataloader)
-                            sample = next(eval_data_iterator)
-                        sample.to(device)
-                        (
-                            _,
-                            _,
-                            _,
-                            mt_target_preds,
-                            mt_target_labels,
-                            mt_target_weights,
-                        ) = model.forward(
-                            sample.uih_features_kjt,
-                            sample.candidates_features_kjt,
-                        )
-                        metric_logger.update(
-                            mode="eval",
-                            predictions=mt_target_preds,
-                            labels=mt_target_labels,
-                            weights=mt_target_weights,
-                            num_candidates=sample.candidates_features_kjt.lengths().view(
-                                len(sample.candidates_features_kjt.keys()), -1
-                            )[0],
-                        )
-                        eval_batch_idx += 1
-                        if output_trace:
-                            assert profiler is not None
-                            profiler.step()
-                        if eval_batch_idx % metric_log_frequency == 0:
-                            metric_logger.compute_and_log(mode="eval")
-                        if (
-                            num_eval_batches is not None
-                            and eval_batch_idx >= num_eval_batches
-                        ):
-                            break
-                    for k, v in metric_logger.compute(mode="eval").items():
-                        print(f"{k}: {v}")
-                model.train()
             if num_train_batches is not None and train_batch_idx >= num_train_batches:
                 break
+
+        # Full bounded eval pass at the end of every eval_frequency epochs.
+        if epoch % eval_frequency == 0:
+            model.eval()
+            eval_batch_idx: int = 0
+            metric_logger.reset(mode="eval")
+            with torch.no_grad():
+                for sample in eval_dataloader:
+                    sample.to(device)
+                    (
+                        _,
+                        _,
+                        _,
+                        mt_target_preds,
+                        mt_target_labels,
+                        mt_target_weights,
+                    ) = model.forward(
+                        sample.uih_features_kjt,
+                        sample.candidates_features_kjt,
+                    )
+                    metric_logger.update(
+                        mode="eval",
+                        predictions=mt_target_preds,
+                        labels=mt_target_labels,
+                        weights=mt_target_weights,
+                        num_candidates=sample.candidates_features_kjt.lengths().view(
+                            len(sample.candidates_features_kjt.keys()), -1
+                        )[0],
+                    )
+                    eval_batch_idx += 1
+                    if (
+                        num_eval_batches is not None
+                        and eval_batch_idx >= num_eval_batches
+                    ):
+                        break
+            metric_logger.compute_and_log(mode="eval")
+            if rank == 0:
+                for k, v in metric_logger.compute(mode="eval").items():
+                    print(f"[epoch {epoch}] eval {k}: {v}")
+
+        if num_train_batches is not None and train_batch_idx >= num_train_batches:
+            break
 
 
 @gin.configurable

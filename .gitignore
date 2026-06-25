@@ -1,4 +1,5 @@
 # Don't check in parsed data files and other temporary files
+logs/
 tmp/
 exps/
 ckpts/

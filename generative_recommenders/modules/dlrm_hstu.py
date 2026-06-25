@@ -64,6 +64,7 @@ class SequenceEmbedding(NamedTuple):
 @dataclass
 class DlrmHSTUConfig:
     max_seq_len: int = 16384
+    max_attn_len: Optional[int] = None
     max_num_candidates: int = 10
     max_num_candidates_inference: int = 5
     hstu_num_heads: int = 1
@@ -227,7 +228,7 @@ class DlrmHSTU(HammerModule):
                         use_group_norm=hstu_configs.hstu_group_norm,
                         causal=True,
                         target_aware=True,
-                        max_attn_len=None,
+                        max_attn_len=hstu_configs.max_attn_len,
                         attn_alpha=None,
                         recompute_normed_x=True,
                         recompute_uvqk=True,
