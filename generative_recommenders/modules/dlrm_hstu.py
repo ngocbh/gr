@@ -42,7 +42,22 @@ from generative_recommenders.modules.postprocessors import (
     TimestampLayerNormPostprocessor,
 )
 from generative_recommenders.modules.preprocessors import ContextualPreprocessor
-from generative_recommenders.modules.stu import STU, STULayer, STULayerConfig, STUStack
+from generative_recommenders.modules.stu import (
+    STU,
+    STULayer,
+    STULayerAttnRes,
+    STULayerConfig,
+    STULayermHC,
+    STULayerNeuTRENO,
+    STUStack,
+    STUStackAttnRes,
+    STUStackmHC,
+    STUStackNeuTRENO,
+)
+from generative_recommenders.modules.stu_pytorch import (
+    STULayerPyTorch,
+    STUStackPyTorch,
+)
 from generative_recommenders.ops.jagged_tensors import concat_2D_jagged
 from generative_recommenders.ops.layer_norm import LayerNorm, SwishLayerNorm
 from torch.autograd.profiler import record_function
@@ -98,6 +113,14 @@ class DlrmHSTUConfig:
     action_embedding_init_std: float = 0.1
     enable_postprocessor: bool = True
     use_layer_norm_postprocessor: bool = False
+    # STU variant: "STU" (vanilla), "NeuTRENO", "AttnRes", or "mHC".
+    stu_module_type: str = "STU"
+    neutreno_lambda: float = 0.4
+    neutreno_after_norm: bool = False
+    attnres_block_size: int = 1
+    mhc_num_streams: int = 4
+    mhc_num_iters: int = 20
+    mhc_tau: float = 0.05
 
 
 def _get_supervision_labels_and_weights(
@@ -117,6 +140,66 @@ def _get_supervision_labels_and_weights(
         else:
             raise RuntimeError("Unsupported MultitaskTaskType")
     return supervision_labels, supervision_weights
+
+
+def _build_stu_stack(
+    stu_module_type: str,
+    config: STULayerConfig,
+    num_layers: int,
+    embedding_dim: int,
+    attnres_block_size: int,
+    mhc_num_streams: int,
+    mhc_num_iters: int,
+    mhc_tau: float,
+    is_inference: bool,
+) -> STU:
+    if stu_module_type == "STU":
+        return STUStack(
+            stu_list=[
+                STULayer(config=config, is_inference=is_inference)
+                for _ in range(num_layers)
+            ],
+            is_inference=is_inference,
+        )
+    elif stu_module_type == "STU_PYTORCH":
+        return STUStackPyTorch(
+            stu_list=[
+                STULayerPyTorch(config=config, is_inference=is_inference)
+                for _ in range(num_layers)
+            ],
+            is_inference=is_inference,
+        )
+    elif stu_module_type == "NeuTRENO":
+        return STUStackNeuTRENO(
+            stu_list=[
+                STULayerNeuTRENO(config=config, is_inference=is_inference)
+                for _ in range(num_layers)
+            ],
+            is_inference=is_inference,
+        )
+    elif stu_module_type == "AttnRes":
+        return STUStackAttnRes(
+            stu_list=[
+                STULayerAttnRes(config=config, is_inference=is_inference)
+                for _ in range(num_layers)
+            ],
+            embedding_dim=embedding_dim,
+            attnres_block_size=attnres_block_size,
+            is_inference=is_inference,
+        )
+    elif stu_module_type == "mHC":
+        return STUStackmHC(
+            stu_list=[
+                STULayermHC(config=config, is_inference=is_inference)
+                for _ in range(num_layers)
+            ],
+            num_streams=mhc_num_streams,
+            num_iters=mhc_num_iters,
+            tau=mhc_tau,
+            is_inference=is_inference,
+        )
+    else:
+        raise ValueError(f"Unsupported stu_module_type {stu_module_type}")
 
 
 class DlrmHSTU(HammerModule):
@@ -216,30 +299,37 @@ class DlrmHSTU(HammerModule):
             postprocessor = None
 
         # construct HSTU
-        stu_module: STU = STUStack(
-            stu_list=[
-                STULayer(
-                    config=STULayerConfig(
-                        embedding_dim=hstu_configs.hstu_transducer_embedding_dim,
-                        num_heads=hstu_configs.hstu_num_heads,
-                        hidden_dim=hstu_configs.hstu_attn_linear_dim,
-                        attention_dim=hstu_configs.hstu_attn_qk_dim,
-                        output_dropout_ratio=hstu_configs.hstu_linear_dropout_rate,
-                        use_group_norm=hstu_configs.hstu_group_norm,
-                        causal=True,
-                        target_aware=True,
-                        max_attn_len=hstu_configs.max_attn_len,
-                        attn_alpha=None,
-                        recompute_normed_x=True,
-                        recompute_uvqk=True,
-                        recompute_y=True,
-                        sort_by_length=True,
-                        contextual_seq_len=0,
-                    ),
-                    is_inference=is_inference,
-                )
-                for _ in range(hstu_configs.hstu_attn_num_layers)
-            ],
+        stu_layer_config = STULayerConfig(
+            embedding_dim=hstu_configs.hstu_transducer_embedding_dim,
+            num_heads=hstu_configs.hstu_num_heads,
+            hidden_dim=hstu_configs.hstu_attn_linear_dim,
+            attention_dim=hstu_configs.hstu_attn_qk_dim,
+            output_dropout_ratio=hstu_configs.hstu_linear_dropout_rate,
+            use_group_norm=hstu_configs.hstu_group_norm,
+            causal=True,
+            target_aware=True,
+            max_attn_len=hstu_configs.max_attn_len,
+            attn_alpha=None,
+            recompute_normed_x=True,
+            recompute_uvqk=True,
+            recompute_y=True,
+            sort_by_length=True,
+            contextual_seq_len=0,
+            neutreno_lambda=hstu_configs.neutreno_lambda,
+            neutreno_after_norm=hstu_configs.neutreno_after_norm,
+            mhc_num_streams=hstu_configs.mhc_num_streams,
+            mhc_num_iters=hstu_configs.mhc_num_iters,
+            mhc_tau=hstu_configs.mhc_tau,
+        )
+        stu_module: STU = _build_stu_stack(
+            stu_module_type=hstu_configs.stu_module_type,
+            config=stu_layer_config,
+            num_layers=hstu_configs.hstu_attn_num_layers,
+            embedding_dim=hstu_configs.hstu_transducer_embedding_dim,
+            attnres_block_size=hstu_configs.attnres_block_size,
+            mhc_num_streams=hstu_configs.mhc_num_streams,
+            mhc_num_iters=hstu_configs.mhc_num_iters,
+            mhc_tau=hstu_configs.mhc_tau,
             is_inference=is_inference,
         )
         self._hstu_transducer: HSTUTransducer = HSTUTransducer(

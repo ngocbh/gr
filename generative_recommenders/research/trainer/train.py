@@ -134,6 +134,7 @@ def train_fn(
     l2_norm_eps: float = 1e-6,
     enable_tf32: bool = False,
     random_seed: int = 42,
+    exp_suffix: Optional[str] = None,
     wandb_enabled: bool = False,
     wandb_project: Optional[str] = None,
     wandb_entity: Optional[str] = None,
@@ -294,6 +295,10 @@ def train_fn(
         model_desc += f"-fe{full_eval_every_n}"
     if positional_sampling_ratio is not None and positional_sampling_ratio < 1:
         model_desc += f"-d{positional_sampling_ratio}"
+    # Optional free-form suffix to separate otherwise-identical runs (e.g. seeds in
+    # a sweep), which keeps each run's logs/checkpoints in their own directory.
+    if exp_suffix:
+        model_desc += f"-{exp_suffix}"
     # creates subfolders.
     exps_root = os.environ.get("GR_EXPS_ROOT", "./exps")
     ckpts_root = os.environ.get("GR_CKPTS_ROOT", "./ckpts")

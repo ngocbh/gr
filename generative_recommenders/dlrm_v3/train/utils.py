@@ -170,12 +170,33 @@ def make_model(
     dataset: str,
     max_seq_len: Optional[int] = None,
     max_attn_len: Optional[int] = None,
+    stu_module_type: Optional[str] = None,
+    neutreno_lambda: Optional[float] = None,
+    neutreno_after_norm: Optional[bool] = None,
+    attnres_block_size: Optional[int] = None,
+    mhc_num_streams: Optional[int] = None,
+    mhc_num_iters: Optional[int] = None,
+    mhc_tau: Optional[float] = None,
 ) -> Tuple[torch.nn.Module, DlrmHSTUConfig, Dict[str, EmbeddingConfig]]:
     hstu_config = get_hstu_configs(dataset)
     if max_seq_len is not None:
         hstu_config.max_seq_len = max_seq_len
     if max_attn_len is not None:
         hstu_config.max_attn_len = max_attn_len
+    if stu_module_type is not None:
+        hstu_config.stu_module_type = stu_module_type
+    if neutreno_lambda is not None:
+        hstu_config.neutreno_lambda = neutreno_lambda
+    if neutreno_after_norm is not None:
+        hstu_config.neutreno_after_norm = neutreno_after_norm
+    if attnres_block_size is not None:
+        hstu_config.attnres_block_size = attnres_block_size
+    if mhc_num_streams is not None:
+        hstu_config.mhc_num_streams = mhc_num_streams
+    if mhc_num_iters is not None:
+        hstu_config.mhc_num_iters = mhc_num_iters
+    if mhc_tau is not None:
+        hstu_config.mhc_tau = mhc_tau
     table_config = get_embedding_table_config(dataset)
 
     model = DlrmHSTU(
@@ -440,7 +461,7 @@ def train_loop(
     num_batches: Optional[int] = None,
     output_trace: bool = False,
     metric_log_frequency: int = 1,
-    checkpoint_frequency: int = 100,
+    checkpoint_frequency: int = 1000,
     start_batch_idx: int = 0,
     # lr_scheduler: to-do: Add a scheduler
 ) -> None:
@@ -499,6 +520,17 @@ def train_loop(
                 break
         if num_batches is not None and batch_idx >= num_batches:
             break
+
+    # Save a final checkpoint at the last iteration if it wasn't just saved.
+    last_idx = batch_idx - 1
+    if last_idx > 0 and last_idx % checkpoint_frequency != 0:
+        save_dmp_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            metric_logger=metric_logger,
+            rank=rank,
+            batch_idx=last_idx,
+        )
 
 
 @gin.configurable
@@ -567,7 +599,7 @@ def train_eval_loop(
     eval_dataloader: Optional[torch.utils.data.DataLoader] = None,
     output_trace: bool = False,
     metric_log_frequency: int = 1,
-    checkpoint_frequency: int = 100,
+    checkpoint_frequency: int = 1000,
     eval_frequency: int = 1,
     start_train_batch_idx: int = 0,
     start_eval_batch_idx: int = 0,
@@ -670,6 +702,17 @@ def train_eval_loop(
         if num_train_batches is not None and train_batch_idx >= num_train_batches:
             break
 
+    # Save a final checkpoint at the last iteration if it wasn't just saved.
+    last_idx = train_batch_idx - 1
+    if last_idx > 0 and last_idx % checkpoint_frequency != 0:
+        save_dmp_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            metric_logger=metric_logger,
+            rank=rank,
+            batch_idx=last_idx,
+        )
+
 
 @gin.configurable
 def streaming_train_eval_loop(
@@ -685,7 +728,7 @@ def streaming_train_eval_loop(
     num_eval_batches: Optional[int] = None,
     output_trace: bool = False,
     metric_log_frequency: int = 1,
-    checkpoint_frequency: int = 100,
+    checkpoint_frequency: int = 1000,
 ) -> None:
     profiler = Profiler(rank, active=10) if output_trace else None
     dataset_class, kwargs = get_dataset()

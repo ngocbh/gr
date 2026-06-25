@@ -1,0 +1,43 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+train_fn.dataset_name = "ml-1m"
+train_fn.max_sequence_length = 200
+train_fn.local_batch_size = 128
+
+train_fn.main_module = "HSTU-mHC"
+train_fn.dropout_rate = 0.2
+train_fn.user_embedding_norm = "l2_norm"
+train_fn.num_epochs = 101
+train_fn.item_embedding_dim = 50
+
+hstu_mhc_encoder.num_blocks = 8
+hstu_mhc_encoder.num_heads = 2
+hstu_mhc_encoder.dqk = 25
+hstu_mhc_encoder.dv = 25
+hstu_mhc_encoder.linear_dropout_rate = 0.2
+# Manifold-constrained hyper-connections: widen the residual into N streams wired by
+# per-block hyper-connections whose width map H_res is Sinkhorn-projected to a
+# doubly-stochastic matrix. mhc_num_streams = 1 recovers (approx.) vanilla HSTU.
+hstu_mhc_encoder.mhc_num_streams = 4
+hstu_mhc_encoder.mhc_num_iters = 20
+hstu_mhc_encoder.mhc_tau = 0.05
+
+train_fn.learning_rate = 1e-3
+train_fn.weight_decay = 0
+train_fn.num_warmup_steps = 0
+
+train_fn.interaction_module_type = "DotProduct"
+train_fn.top_k_method = "MIPSBruteForceTopK"
+
+train_fn.loss_module = "SampledSoftmaxLoss"
+train_fn.num_negatives = 128
+
+train_fn.sampling_strategy = "local"
+train_fn.temperature = 0.05
+train_fn.item_l2_norm = True
+train_fn.l2_norm_eps = 1e-6
+
+train_fn.enable_tf32 = True
+
+create_data_loader.prefetch_factor = 128
+create_data_loader.num_workers = 8

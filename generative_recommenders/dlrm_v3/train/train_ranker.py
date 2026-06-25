@@ -22,6 +22,7 @@ import random
 import sys
 import traceback
 from datetime import datetime
+from typing import Optional
 
 import gin
 import numpy as np
@@ -124,6 +125,13 @@ def _main_func(
     run_name: str,
     max_seq_len: int,
     max_attn_len: int,
+    stu_module: Optional[str],
+    neutreno_lambda: Optional[float],
+    neutreno_after_norm: Optional[bool],
+    attnres_block_size: Optional[int],
+    mhc_num_streams: Optional[int],
+    mhc_num_iters: Optional[int],
+    mhc_tau: Optional[float],
 ) -> None:
     device = torch.device(f"cuda:{rank}")
     logger.info(f"rank: {rank}, world_size: {world_size}, device: {device}")
@@ -150,6 +158,20 @@ def _main_func(
         gin.bind_parameter("make_model.max_seq_len", max_seq_len)
     if max_attn_len > 0:
         gin.bind_parameter("make_model.max_attn_len", max_attn_len)
+    if stu_module is not None:
+        gin.bind_parameter("make_model.stu_module_type", stu_module)
+    if neutreno_lambda is not None:
+        gin.bind_parameter("make_model.neutreno_lambda", neutreno_lambda)
+    if neutreno_after_norm is not None:
+        gin.bind_parameter("make_model.neutreno_after_norm", neutreno_after_norm)
+    if attnres_block_size is not None:
+        gin.bind_parameter("make_model.attnres_block_size", attnres_block_size)
+    if mhc_num_streams is not None:
+        gin.bind_parameter("make_model.mhc_num_streams", mhc_num_streams)
+    if mhc_num_iters is not None:
+        gin.bind_parameter("make_model.mhc_num_iters", mhc_num_iters)
+    if mhc_tau is not None:
+        gin.bind_parameter("make_model.mhc_tau", mhc_tau)
 
     model, model_configs, embedding_table_configs = make_model()
     model, optimizer = make_optimizer_and_shard(
@@ -261,6 +283,50 @@ def get_args():  # pyre-ignore [3]
         default=0,
         help="sliding-window attention span (each token attends to prev N tokens); 0 = full causal attention",
     )
+    parser.add_argument(
+        "--stu-module",
+        default=None,
+        choices=["STU", "STU_PYTORCH", "NeuTRENO", "AttnRes", "mHC"],
+        help="STU variant: STU (vanilla fused), STU_PYTORCH (vanilla eager-PyTorch), "
+        "NeuTRENO, AttnRes, or mHC; None = use config default",
+    )
+    parser.add_argument(
+        "--neutreno-lambda",
+        type=float,
+        default=None,
+        help="NeuTRENO anti-oversmoothing strength (only used when --stu-module=NeuTRENO)",
+    )
+    parser.add_argument(
+        "--neutreno-after-norm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="inject the NeuTRENO term AFTER the output norm (default: before norm); "
+        "only used when --stu-module=NeuTRENO",
+    )
+    parser.add_argument(
+        "--attnres-block-size",
+        type=int,
+        default=None,
+        help="AttnRes layers per block; 1 = Full AttnRes (only used when --stu-module=AttnRes)",
+    )
+    parser.add_argument(
+        "--mhc-num-streams",
+        type=int,
+        default=None,
+        help="mHC residual stream count; 1 ~ vanilla residual (only used when --stu-module=mHC)",
+    )
+    parser.add_argument(
+        "--mhc-num-iters",
+        type=int,
+        default=None,
+        help="mHC Sinkhorn iterations for H_res projection (only used when --stu-module=mHC)",
+    )
+    parser.add_argument(
+        "--mhc-tau",
+        type=float,
+        default=None,
+        help="mHC Sinkhorn temperature; smaller = sharper H_res (only used when --stu-module=mHC)",
+    )
     args, unknown_args = parser.parse_known_args()
     logger.warning(f"unknown_args: {unknown_args}")
     return args
@@ -298,6 +364,13 @@ def main() -> None:
             run_name,
             args.max_seq_len,
             args.max_attn_len,
+            args.stu_module,
+            args.neutreno_lambda,
+            args.neutreno_after_norm,
+            args.attnres_block_size,
+            args.mhc_num_streams,
+            args.mhc_num_iters,
+            args.mhc_tau,
         ),
         nprocs=WORLD_SIZE,
         join=True,

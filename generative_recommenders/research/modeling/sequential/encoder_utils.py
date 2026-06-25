@@ -19,6 +19,15 @@ from generative_recommenders.research.modeling.sequential.embedding_modules impo
     EmbeddingModule,
 )
 from generative_recommenders.research.modeling.sequential.hstu import HSTU
+from generative_recommenders.research.modeling.sequential.hstu_attnres import (
+    HSTUAttnRes,
+)
+from generative_recommenders.research.modeling.sequential.hstu_neutreno import (
+    HSTUNeuTRENO,
+)
+from generative_recommenders.research.modeling.sequential.hstu_mhc import (
+    HSTUmHC,
+)
 from generative_recommenders.research.modeling.sequential.input_features_preprocessors import (
     InputFeaturesPreprocessorModule,
 )
@@ -112,6 +121,173 @@ def hstu_encoder(
 
 
 @gin.configurable
+def hstu_neutreno_encoder(
+    max_sequence_length: int,
+    max_output_length: int,
+    embedding_module: EmbeddingModule,
+    similarity_module: SimilarityModule,
+    input_preproc_module: InputFeaturesPreprocessorModule,
+    output_postproc_module: OutputPostprocessorModule,
+    activation_checkpoint: bool,
+    verbose: bool,
+    num_blocks: int = 2,
+    num_heads: int = 1,
+    dqk: int = 64,
+    dv: int = 64,
+    linear_dropout_rate: float = 0.0,
+    attn_dropout_rate: float = 0.0,
+    normalization: str = "rel_bias",
+    linear_config: str = "uvqk",
+    linear_activation: str = "silu",
+    concat_ua: bool = False,
+    enable_relative_attention_bias: bool = True,
+    neutreno_lambda: float = 0.4,
+    neutreno_after_norm: bool = False,
+) -> SequentialEncoderWithLearnedSimilarityModule:
+    """HSTU with the NeuTRENO anti-oversmoothing term; mirrors hstu_encoder.
+
+    Each block adds ``neutreno_lambda * (v_0 - v_l)`` to its attention output, where
+    ``v_0`` is the first block's value and ``v_l`` the current block's value.
+    ``neutreno_lambda = 0`` recovers vanilla HSTU. ``neutreno_after_norm`` injects the
+    term after the attn-output norm instead of before (default).
+    """
+    return HSTUNeuTRENO(
+        embedding_module=embedding_module,
+        similarity_module=similarity_module,  # pyre-ignore [6]
+        input_features_preproc_module=input_preproc_module,
+        output_postproc_module=output_postproc_module,
+        max_sequence_len=max_sequence_length,
+        max_output_len=max_output_length,
+        embedding_dim=embedding_module.item_embedding_dim,
+        num_blocks=num_blocks,
+        num_heads=num_heads,
+        attention_dim=dqk,
+        linear_dim=dv,
+        linear_dropout_rate=linear_dropout_rate,
+        attn_dropout_rate=attn_dropout_rate,
+        linear_config=linear_config,
+        linear_activation=linear_activation,
+        normalization=normalization,
+        concat_ua=concat_ua,
+        enable_relative_attention_bias=enable_relative_attention_bias,
+        verbose=verbose,
+        neutreno_lambda=neutreno_lambda,
+        neutreno_after_norm=neutreno_after_norm,
+    )
+
+
+@gin.configurable
+def hstu_attnres_encoder(
+    max_sequence_length: int,
+    max_output_length: int,
+    embedding_module: EmbeddingModule,
+    similarity_module: SimilarityModule,
+    input_preproc_module: InputFeaturesPreprocessorModule,
+    output_postproc_module: OutputPostprocessorModule,
+    activation_checkpoint: bool,
+    verbose: bool,
+    num_blocks: int = 2,
+    num_heads: int = 1,
+    dqk: int = 64,
+    dv: int = 64,
+    linear_dropout_rate: float = 0.0,
+    attn_dropout_rate: float = 0.0,
+    normalization: str = "rel_bias",
+    linear_config: str = "uvqk",
+    linear_activation: str = "silu",
+    concat_ua: bool = False,
+    enable_relative_attention_bias: bool = True,
+    attnres_block_size: int = 1,
+) -> SequentialEncoderWithLearnedSimilarityModule:
+    """HSTU with Attention Residuals; mirrors hstu_encoder.
+
+    ``attnres_block_size`` is the number of HSTU layers per AttnRes block; 1 (default)
+    is Full AttnRes (each layer attends over all previous layer outputs), larger values
+    are the memory-efficient Block AttnRes variant.
+    """
+    return HSTUAttnRes(
+        embedding_module=embedding_module,
+        similarity_module=similarity_module,  # pyre-ignore [6]
+        input_features_preproc_module=input_preproc_module,
+        output_postproc_module=output_postproc_module,
+        max_sequence_len=max_sequence_length,
+        max_output_len=max_output_length,
+        embedding_dim=embedding_module.item_embedding_dim,
+        num_blocks=num_blocks,
+        num_heads=num_heads,
+        attention_dim=dqk,
+        linear_dim=dv,
+        linear_dropout_rate=linear_dropout_rate,
+        attn_dropout_rate=attn_dropout_rate,
+        linear_config=linear_config,
+        linear_activation=linear_activation,
+        normalization=normalization,
+        concat_ua=concat_ua,
+        enable_relative_attention_bias=enable_relative_attention_bias,
+        verbose=verbose,
+        attnres_block_size=attnres_block_size,
+    )
+
+
+@gin.configurable
+def hstu_mhc_encoder(
+    max_sequence_length: int,
+    max_output_length: int,
+    embedding_module: EmbeddingModule,
+    similarity_module: SimilarityModule,
+    input_preproc_module: InputFeaturesPreprocessorModule,
+    output_postproc_module: OutputPostprocessorModule,
+    activation_checkpoint: bool,
+    verbose: bool,
+    num_blocks: int = 2,
+    num_heads: int = 1,
+    dqk: int = 64,
+    dv: int = 64,
+    linear_dropout_rate: float = 0.0,
+    attn_dropout_rate: float = 0.0,
+    normalization: str = "rel_bias",
+    linear_config: str = "uvqk",
+    linear_activation: str = "silu",
+    concat_ua: bool = False,
+    enable_relative_attention_bias: bool = True,
+    mhc_num_streams: int = 4,
+    mhc_num_iters: int = 20,
+    mhc_tau: float = 0.05,
+) -> SequentialEncoderWithLearnedSimilarityModule:
+    """HSTU with manifold-constrained hyper-connections; mirrors hstu_encoder.
+
+    The single residual stream is widened into ``mhc_num_streams`` streams wired by
+    per-block hyper-connections whose width map ``H_res`` is Sinkhorn-projected
+    (``mhc_num_iters`` iters, temperature ``mhc_tau``) to a doubly-stochastic matrix.
+    ``mhc_num_streams = 1`` recovers (approximately) vanilla HSTU.
+    """
+    return HSTUmHC(
+        embedding_module=embedding_module,
+        similarity_module=similarity_module,  # pyre-ignore [6]
+        input_features_preproc_module=input_preproc_module,
+        output_postproc_module=output_postproc_module,
+        max_sequence_len=max_sequence_length,
+        max_output_len=max_output_length,
+        embedding_dim=embedding_module.item_embedding_dim,
+        num_blocks=num_blocks,
+        num_heads=num_heads,
+        attention_dim=dqk,
+        linear_dim=dv,
+        linear_dropout_rate=linear_dropout_rate,
+        attn_dropout_rate=attn_dropout_rate,
+        linear_config=linear_config,
+        linear_activation=linear_activation,
+        normalization=normalization,
+        concat_ua=concat_ua,
+        enable_relative_attention_bias=enable_relative_attention_bias,
+        verbose=verbose,
+        mhc_num_streams=mhc_num_streams,
+        mhc_num_iters=mhc_num_iters,
+        mhc_tau=mhc_tau,
+    )
+
+
+@gin.configurable
 def get_sequential_encoder(
     module_type: str,
     max_sequence_length: int,
@@ -136,6 +312,39 @@ def get_sequential_encoder(
         )
     elif module_type == "HSTU":
         model = hstu_encoder(
+            max_sequence_length=max_sequence_length,
+            max_output_length=max_output_length,
+            embedding_module=embedding_module,
+            similarity_module=interaction_module,
+            input_preproc_module=input_preproc_module,
+            output_postproc_module=output_postproc_module,
+            activation_checkpoint=activation_checkpoint,
+            verbose=verbose,
+        )
+    elif module_type == "HSTU-NeuTRENO":
+        model = hstu_neutreno_encoder(
+            max_sequence_length=max_sequence_length,
+            max_output_length=max_output_length,
+            embedding_module=embedding_module,
+            similarity_module=interaction_module,
+            input_preproc_module=input_preproc_module,
+            output_postproc_module=output_postproc_module,
+            activation_checkpoint=activation_checkpoint,
+            verbose=verbose,
+        )
+    elif module_type == "HSTU-AttnRes":
+        model = hstu_attnres_encoder(
+            max_sequence_length=max_sequence_length,
+            max_output_length=max_output_length,
+            embedding_module=embedding_module,
+            similarity_module=interaction_module,
+            input_preproc_module=input_preproc_module,
+            output_postproc_module=output_postproc_module,
+            activation_checkpoint=activation_checkpoint,
+            verbose=verbose,
+        )
+    elif module_type == "HSTU-mHC":
+        model = hstu_mhc_encoder(
             max_sequence_length=max_sequence_length,
             max_output_length=max_output_length,
             embedding_module=embedding_module,
