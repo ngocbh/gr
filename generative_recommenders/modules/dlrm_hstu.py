@@ -60,7 +60,9 @@ from generative_recommenders.modules.stu_pytorch import (
 )
 from generative_recommenders.modules.stu_deltanet import (
     STULayerDeltaNet,
+    STULayerpDeltaNet,
     STUStackDeltaNet,
+    STUStackpDeltaNet,
 )
 from generative_recommenders.ops.jagged_tensors import concat_2D_jagged
 from generative_recommenders.ops.layer_norm import LayerNorm, SwishLayerNorm
@@ -177,6 +179,14 @@ def _build_stu_stack(
         return STUStackDeltaNet(
             stu_list=[
                 STULayerDeltaNet(config=config, is_inference=is_inference)
+                for _ in range(num_layers)
+            ],
+            is_inference=is_inference,
+        )
+    elif stu_module_type == "STU_PDELTANET":
+        return STUStackpDeltaNet(
+            stu_list=[
+                STULayerpDeltaNet(config=config, is_inference=is_inference)
                 for _ in range(num_layers)
             ],
             is_inference=is_inference,

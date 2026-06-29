@@ -315,11 +315,42 @@ class STULayerDeltaNet(STULayer):
 
         # Blend gate g_l over [Q, U, hist_len] -> scalar; bias init negative so
         # alpha ~= 0 at start (reduces to windowed HSTU).
-        gate_in = H * d_qk + H * d_hidden + 1
+        gate_in = self._gate_input_dim()
         self._gate_weight: torch.nn.Parameter = torch.nn.Parameter(
             torch.zeros(gate_in)
         )
         self._gate_bias: torch.nn.Parameter = torch.nn.Parameter(torch.tensor(-4.0))
+
+    def _gate_input_dim(self) -> int:
+        """Width of the blend-gate input vector. Base: ``[Q, U, hist_frac]``."""
+        return (
+            self._num_heads * self._attention_dim
+            + self._num_heads * self._hidden_dim
+            + 1
+        )
+
+    def _delta_write_mask(
+        self,
+        total: int,
+        x_offsets: torch.Tensor,
+        x_lengths: torch.Tensor,
+        num_targets: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Boolean ``[total, 1]`` mask: which tokens write to the delta state A.
+
+        Base (``STU_DELTANET``): every user-history position writes -- all tokens
+        strictly before the candidate block. Candidates/targets/padding are
+        read-only. The recent window is therefore covered by *both* the windowed
+        attention and the delta memory (overlapping). ``STUpDeltaNet`` overrides
+        this to make the split non-overlapping.
+        """
+        lengths = x_offsets[1:] - x_offsets[:-1]  # [B]
+        token_start = torch.repeat_interleave(x_offsets[:-1], lengths)  # [total]
+        pos_in_seq = torch.arange(total, device=device) - token_start
+        hist_len = (x_lengths - num_targets).clamp_min(0)  # [B]
+        hist_per_token = torch.repeat_interleave(hist_len, lengths)  # [total]
+        return (pos_in_seq < hist_per_token).unsqueeze(1)  # [total, 1]
 
     def _delta_long(
         self,
@@ -352,17 +383,13 @@ class STULayerDeltaNet(STULayer):
             + self._beta_b.to(dtype)
         )  # [total, H]
 
-        # History mask on the jagged layout: a token writes to A only if it is
-        # strictly before its user's candidate block. Candidates/targets/padding
-        # are read-only (beta=0 -> no write, gamma=1 -> no decay).
-        lengths = x_offsets[1:] - x_offsets[:-1]  # [B]
-        token_start = torch.repeat_interleave(x_offsets[:-1], lengths)  # [total]
-        pos_in_seq = torch.arange(total, device=q.device) - token_start
-        hist_len = (x_lengths - num_targets).clamp_min(0)  # [B]
-        hist_per_token = torch.repeat_interleave(hist_len, lengths)  # [total]
-        history = (pos_in_seq < hist_per_token).unsqueeze(1)  # [total, 1]
-        beta = torch.where(history, beta, torch.zeros_like(beta))
-        gamma = torch.where(history, gamma, torch.ones_like(gamma))
+        # Which tokens write to the delta state A (overridable per variant:
+        # STU_DELTANET = all history; STUpDeltaNet = only history older than W).
+        write = self._delta_write_mask(
+            total, x_offsets, x_lengths, num_targets, q.device
+        )  # [total, 1] bool
+        beta = torch.where(write, beta, torch.zeros_like(beta))
+        gamma = torch.where(write, gamma, torch.ones_like(gamma))
 
         # fla varlen: pack as [1, total, H, .] with cu_seqlens = x_offsets, so
         # each user's history is scanned as an independent sequence -- no padding.
@@ -379,6 +406,39 @@ class STULayerDeltaNet(STULayer):
         zo = torch.einsum("thd,hde->the", o.to(dtype), self._psi_wo.to(dtype))
         z_long = zo.reshape(total, H * self._hidden_dim)  # [total, H*d_hidden]
         return z_long
+
+    def _build_gate_input(
+        self,
+        q: torch.Tensor,
+        u: torch.Tensor,
+        x_lengths: torch.Tensor,
+        x_offsets: torch.Tensor,
+        max_seq_len: int,
+        num_targets: torch.Tensor,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Per-token blend-gate input. Base: ``[Q, U, hist_frac]`` where
+        ``hist_frac = hist_len / max_seq_len`` is broadcast to every token.
+        ``STUpDeltaNet`` overrides this to also condition on the candidate."""
+        q_flat = q.reshape(q.shape[0], self._num_heads * self._attention_dim)
+        hist_frac = (
+            dense_to_jagged(
+                jagged_to_padded_dense(
+                    (x_lengths - num_targets)
+                    .clamp_min(0)
+                    .to(dtype)
+                    .unsqueeze(1)
+                    .expand(-1, max_seq_len)
+                    .reshape(-1, 1),
+                    [x_offsets],
+                    [max_seq_len],
+                    0.0,
+                ),
+                [x_offsets],
+            )
+            / float(max_seq_len)
+        )
+        return torch.cat([q_flat, u, hist_frac], dim=1)
 
     def forward(
         self,
@@ -449,27 +509,17 @@ class STULayerDeltaNet(STULayer):
                 num_targets=num_targets,
             )
 
-        # Blend gate alpha = sigmoid(g([Q, U, hist_len]) + b), conservative init.
+        # Blend gate alpha = sigmoid(g([Q, U, hist_len, ...]) + b), conservative init.
         with record_function("## deltanet_gate ##"):
-            q_flat = q.reshape(q.shape[0], self._num_heads * self._attention_dim)
-            hist_frac = (
-                dense_to_jagged(
-                    jagged_to_padded_dense(
-                        (x_lengths - num_targets)
-                        .clamp_min(0)
-                        .to(dtype)
-                        .unsqueeze(1)
-                        .expand(-1, max_seq_len)
-                        .reshape(-1, 1),
-                        [x_offsets],
-                        [max_seq_len],
-                        0.0,
-                    ),
-                    [x_offsets],
-                )
-                / float(max_seq_len)
+            gate_in = self._build_gate_input(
+                q=q,
+                u=u,
+                x_lengths=x_lengths,
+                x_offsets=x_offsets,
+                max_seq_len=max_seq_len,
+                num_targets=num_targets,
+                dtype=dtype,
             )
-            gate_in = torch.cat([q_flat, u, hist_frac], dim=1)
             alpha = torch.sigmoid(
                 gate_in @ self._gate_weight.to(dtype) + self._gate_bias.to(dtype)
             ).unsqueeze(1)  # [total, 1]
@@ -493,6 +543,91 @@ class STULayerDeltaNet(STULayer):
                 num_heads=self._num_heads,
                 linear_dim=self._hidden_dim,
             )
+
+
+class STULayerpDeltaNet(STULayerDeltaNet):
+    """``STUpDeltaNet`` -- the "plus" variant with a *non-overlapping* split:
+
+    The windowed attention (``Z_short``, ``max_attn_len=W``) handles the most
+    recent ``W`` positions before each user's candidate block; the gated-delta
+    memory (``Z_long``) summarizes *only* the older history the window drops, i.e.
+    positions ``[0, hist_len - (W - num_targets)) == [0, x_lengths - W)``. Unlike
+    the base :class:`STULayerDeltaNet` (where the memory writes the full history
+    and so overlaps the window), here attention and memory partition the sequence.
+
+    The blend gate additionally conditions on the candidate (per-user mean of the
+    candidate-block query, broadcast to every token), so how much long memory to
+    mix in can depend on what is being scored.
+    """
+
+    def _delta_write_mask(
+        self,
+        total: int,
+        x_offsets: torch.Tensor,
+        x_lengths: torch.Tensor,
+        num_targets: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Write only history older than the attention window: positions
+        ``[0, x_lengths - W)`` (the last ``W`` tokens -- recent history + the
+        candidate block -- are covered by attention and are read-only here)."""
+        lengths = x_offsets[1:] - x_offsets[:-1]  # [B]
+        token_start = torch.repeat_interleave(x_offsets[:-1], lengths)  # [total]
+        pos_in_seq = torch.arange(total, device=device) - token_start
+        hist_len = (x_lengths - num_targets).clamp_min(0)  # [B]
+        # cut = hist_len - (W - num_targets) = x_lengths - W; clamp into [0, hist_len]
+        # so candidates never write and a non-positive W degrades to full history.
+        cut = torch.minimum((x_lengths - self._max_attn_len).clamp_min(0), hist_len)
+        cut_per_token = torch.repeat_interleave(cut, lengths)  # [total]
+        return (pos_in_seq < cut_per_token).unsqueeze(1)  # [total, 1]
+
+    def _gate_input_dim(self) -> int:
+        # Base [Q, U, hist_frac] plus the per-user candidate query (H*d_qk).
+        return super()._gate_input_dim() + self._num_heads * self._attention_dim
+
+    def _candidate_query(
+        self,
+        q: torch.Tensor,
+        x_offsets: torch.Tensor,
+        x_lengths: torch.Tensor,
+        num_targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-user mean of the candidate-block query, broadcast to every token
+        of that user. Shape ``[total, H*d_qk]``."""
+        total = q.shape[0]
+        d = self._num_heads * self._attention_dim
+        q_flat = q.reshape(total, d)
+        lengths = x_offsets[1:] - x_offsets[:-1]  # [B]
+        B = lengths.shape[0]
+        token_start = torch.repeat_interleave(x_offsets[:-1], lengths)
+        pos_in_seq = torch.arange(total, device=q.device) - token_start
+        hist_len = (x_lengths - num_targets).clamp_min(0)
+        hist_per_token = torch.repeat_interleave(hist_len, lengths)
+        cand_mask = pos_in_seq >= hist_per_token  # candidate tokens [total]
+        user_id = torch.repeat_interleave(
+            torch.arange(B, device=q.device), lengths
+        )
+        cand_sum = torch.zeros(B, d, dtype=q_flat.dtype, device=q.device)
+        cand_sum.index_add_(0, user_id[cand_mask], q_flat[cand_mask])
+        denom = num_targets.clamp_min(1).to(q_flat.dtype).unsqueeze(1)  # [B, 1]
+        cand_mean = cand_sum / denom  # [B, d]
+        return cand_mean[user_id]  # [total, d]
+
+    def _build_gate_input(
+        self,
+        q: torch.Tensor,
+        u: torch.Tensor,
+        x_lengths: torch.Tensor,
+        x_offsets: torch.Tensor,
+        max_seq_len: int,
+        num_targets: torch.Tensor,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        base = super()._build_gate_input(
+            q, u, x_lengths, x_offsets, max_seq_len, num_targets, dtype
+        )
+        cand = self._candidate_query(q, x_offsets, x_lengths, num_targets)
+        return torch.cat([base, cand], dim=1)
 
 
 class STUStackDeltaNet(STU):
@@ -538,3 +673,11 @@ class STUStackDeltaNet(STU):
         raise NotImplementedError(
             "STUStackDeltaNet does not support incremental/cached decoding."
         )
+
+
+class STUStackpDeltaNet(STUStackDeltaNet):
+    """Sequential stack of :class:`STULayerpDeltaNet` blocks (vanilla residual).
+
+    Identical plumbing to :class:`STUStackDeltaNet`; exists as a distinct type so
+    the model factory can select the "plus" (non-overlapping split) variant.
+    """

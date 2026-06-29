@@ -286,9 +286,11 @@ def get_args():  # pyre-ignore [3]
     parser.add_argument(
         "--stu-module",
         default=None,
-        choices=["STU", "STU_PYTORCH", "STU_DELTANET", "NeuTRENO", "AttnRes", "mHC"],
+        choices=["STU", "STU_PYTORCH", "STU_DELTANET", "STU_PDELTANET", "NeuTRENO", "AttnRes", "mHC"],
         help="STU variant: STU (vanilla fused), STU_PYTORCH (vanilla eager-PyTorch), "
-        "STU_DELTANET (windowed attn + gated-delta long memory), "
+        "STU_DELTANET (windowed attn + gated-delta long memory, overlapping), "
+        "STU_PDELTANET (non-overlapping: window=recent W, delta=history older than W, "
+        "candidate-conditioned gate), "
         "NeuTRENO, AttnRes, or mHC; None = use config default",
     )
     parser.add_argument(
