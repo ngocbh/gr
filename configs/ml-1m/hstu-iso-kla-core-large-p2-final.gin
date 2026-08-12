@@ -1,0 +1,50 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# HSTU-large + IsoKLA core, dqk=dv=32 (power-of-2) for a matched 3-way KLA-core comparison.
+# Gated DeltaNet-2 flagship): surgical swap like hstu-iso-kla-core-large, but the
+# write gate is the per-channel anisotropic Kalman gain (kla_kappa_chunk) and the
+# memory update is chunk_kalman (channel-wise erase/write), not scalar-beta
+# chunk_kda. HSTU-large dims exactly (8 blocks, 2 heads, dqk=dv=25).
+# Compare to IsoKLA-core large (0.3250), KDA-core (0.3157), HSTU-large (0.3310).
+#
+# Run: GR_WANDB_ENABLED=1 bash scripts/train.sh research \
+#   configs/ml-1m/hstu-diag-kla-core-large-final.gin --master_port=12452
+
+train_fn.dataset_name = "ml-1m"
+train_fn.max_sequence_length = 200
+train_fn.local_batch_size = 128
+
+train_fn.main_module = "HSTU"
+train_fn.dropout_rate = 0.2
+train_fn.user_embedding_norm = "l2_norm"
+train_fn.num_epochs = 101
+train_fn.item_embedding_dim = 50
+
+hstu_encoder.num_blocks = 8
+hstu_encoder.num_heads = 2
+hstu_encoder.dqk = 32
+hstu_encoder.dv = 32
+hstu_encoder.linear_dropout_rate = 0.2
+hstu_encoder.normalization = "iso_kla"
+hstu_encoder.enable_relative_attention_bias = False
+hstu_encoder.kda_time_gate = "none"
+
+train_fn.learning_rate = 1e-3
+train_fn.weight_decay = 0
+train_fn.num_warmup_steps = 0
+
+train_fn.interaction_module_type = "DotProduct"
+train_fn.top_k_method = "MIPSBruteForceTopK"
+
+train_fn.loss_module = "SampledSoftmaxLoss"
+train_fn.num_negatives = 128
+
+train_fn.sampling_strategy = "local"
+train_fn.temperature = 0.05
+train_fn.item_l2_norm = True
+train_fn.l2_norm_eps = 1e-6
+
+train_fn.enable_tf32 = True
+
+create_data_loader.prefetch_factor = 128
+create_data_loader.num_workers = 8

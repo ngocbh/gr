@@ -18,6 +18,7 @@
 #SBATCH --output=logs/slurm/o_%A.out
 #SBATCH --error=logs/slurm/e_%A.err
 #SBATCH --partition=h200
+#SBATCH --qos=h200_mrs_shared
 #SBATCH --requeue
 #SBATCH --gres=gpu:h200:4
 

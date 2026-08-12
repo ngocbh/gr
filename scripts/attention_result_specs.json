@@ -1,0 +1,398 @@
+{
+  "schema_version": 1,
+  "experiments": {
+    "1671578": {
+      "label": "ML-1M LIFT tail screen",
+      "job_id": "1671578",
+      "snapshot": {
+        "root": "/checkpoints/ngocbh/longhstu/code_snapshots/attention_20260812T065504Z_3685881",
+        "manifest_sha256": "8bc8b6af52cdae4873f8720d75bf46f3121b6f796a17975068a6efbc2b23fd68",
+        "legacy_unmanifested_files": {
+          "GIT_COMMIT": "8e334b25223f66be7ddfe64ec469dd2d95c5c8da03ac2f5c4321fdecf7f248f4",
+          "GIT_STATUS": "175cf34a60115590dfcc225612211c1f26189d39055eac3b472f6df7245c34fe",
+          "WORKTREE.patch": "2d8a5579c75cd4ca4e9e1ae601e4f47447ecb14b46dd2a1c07029ca1167c87fc"
+        }
+      },
+      "run_root": "/checkpoints/ngocbh/longhstu/exps/ml-1m-l200",
+      "scheduler": {
+        "job_name": "fohstu-hybrid",
+        "qos": "h200_mrs_shared",
+        "work_dir": "/storage/home/ngocbh/project/gr",
+        "wrapper": {"form": "relative_workdir", "token": "scripts/sbatch_hybrid_fohstu_ml1m.sh"},
+        "snapshot_export": "GR_CODE_SNAPSHOT",
+        "manifest_export_required": false
+      },
+      "overall_policy": "per_comparison_only",
+      "screen_provenance": "posthoc_fixed_screen",
+      "expected_steps": {
+        "start": 0,
+        "end": 100
+      },
+      "variant_metadata": {
+        "full": {"complexity": "quadratic_training_path", "linear_throughput_claim_eligible": false},
+        "local_w32": {"complexity": "quadratic_training_path", "linear_throughput_claim_eligible": false},
+        "lift_w32": {"complexity": "quadratic_training_oracle", "linear_throughput_claim_eligible": false},
+        "local_w64": {"complexity": "quadratic_training_path", "linear_throughput_claim_eligible": false},
+        "lift_w64": {"complexity": "quadratic_training_oracle", "linear_throughput_claim_eligible": false}
+      },
+      "tasks": [
+        {"task_id": 0, "variant": "full", "seed": 42, "run_name": "ml1m-fohstu-full-seed42"},
+        {"task_id": 1, "variant": "local_w32", "seed": 42, "run_name": "ml1m-fohstu-local-w32-seed42"},
+        {"task_id": 2, "variant": "lift_w32", "seed": 42, "run_name": "ml1m-fohstu-hybrid-w32-seed42"},
+        {"task_id": 3, "variant": "local_w64", "seed": 42, "run_name": "ml1m-fohstu-local-w64-seed42"},
+        {"task_id": 4, "variant": "lift_w64", "seed": 42, "run_name": "ml1m-fohstu-hybrid-w64-seed42"},
+        {"task_id": 5, "variant": "full", "seed": 43, "run_name": "ml1m-fohstu-full-seed43"},
+        {"task_id": 6, "variant": "local_w32", "seed": 43, "run_name": "ml1m-fohstu-local-w32-seed43"},
+        {"task_id": 7, "variant": "lift_w32", "seed": 43, "run_name": "ml1m-fohstu-hybrid-w32-seed43"},
+        {"task_id": 8, "variant": "local_w64", "seed": 43, "run_name": "ml1m-fohstu-local-w64-seed43"},
+        {"task_id": 9, "variant": "lift_w64", "seed": 43, "run_name": "ml1m-fohstu-hybrid-w64-seed43"},
+        {"task_id": 10, "variant": "full", "seed": 44, "run_name": "ml1m-fohstu-full-seed44"},
+        {"task_id": 11, "variant": "local_w32", "seed": 44, "run_name": "ml1m-fohstu-local-w32-seed44"},
+        {"task_id": 12, "variant": "lift_w32", "seed": 44, "run_name": "ml1m-fohstu-hybrid-w32-seed44"},
+        {"task_id": 13, "variant": "local_w64", "seed": 44, "run_name": "ml1m-fohstu-local-w64-seed44"},
+        {"task_id": 14, "variant": "lift_w64", "seed": 44, "run_name": "ml1m-fohstu-hybrid-w64-seed44"}
+      ],
+      "comparisons": [
+        {
+          "id": "lift_w32_vs_local_w32",
+          "candidate": "lift_w32",
+          "baseline": "local_w32",
+          "policy": "fixed_tail_screen",
+          "expected_seeds": [42, 43, 44]
+        },
+        {
+          "id": "lift_w64_vs_local_w64",
+          "candidate": "lift_w64",
+          "baseline": "local_w64",
+          "policy": "fixed_tail_screen",
+          "expected_seeds": [42, 43, 44]
+        }
+      ]
+    },
+    "1671577": {
+      "label": "ML-20M corrected per-head softmax controls",
+      "job_id": "1671577",
+      "snapshot": {
+        "root": "/checkpoints/ngocbh/longhstu/code_snapshots/attention_20260812T065500Z_3685832",
+        "manifest_sha256": "8bc8b6af52cdae4873f8720d75bf46f3121b6f796a17975068a6efbc2b23fd68",
+        "legacy_unmanifested_files": {
+          "GIT_COMMIT": "8e334b25223f66be7ddfe64ec469dd2d95c5c8da03ac2f5c4321fdecf7f248f4",
+          "GIT_STATUS": "175cf34a60115590dfcc225612211c1f26189d39055eac3b472f6df7245c34fe",
+          "WORKTREE.patch": "2d8a5579c75cd4ca4e9e1ae601e4f47447ecb14b46dd2a1c07029ca1167c87fc"
+        }
+      },
+      "run_root": "/checkpoints/ngocbh/longhstu/exps/ml-20m-l200",
+      "scheduler": {
+        "job_name": "hstu-attn-ab",
+        "qos": "h200_mrs_shared",
+        "work_dir": "/storage/home/ngocbh/project/gr",
+        "wrapper": {"form": "relative_workdir", "token": "scripts/sbatch_attention_ab_ml20m.sh"},
+        "snapshot_export": "GR_CODE_SNAPSHOT",
+        "manifest_export_required": false
+      },
+      "overall_policy": "per_comparison_only",
+      "screen_provenance": "no_fixed_screen",
+      "expected_steps": {
+        "start": 0,
+        "end": 100
+      },
+      "variant_metadata": {
+        "hstu": {"complexity": "quadratic_pairwise", "linear_throughput_claim_eligible": false},
+        "historical_scaled_softmax": {"complexity": "quadratic_pairwise", "linear_throughput_claim_eligible": false},
+        "unscaled_softmax": {"complexity": "quadratic_pairwise", "linear_throughput_claim_eligible": false},
+        "canonical_softmax": {"complexity": "quadratic_pairwise", "linear_throughput_claim_eligible": false}
+      },
+      "tasks": [
+        {"task_id": 0, "variant": "hstu", "seed": 42, "run_name": "ml20m-hstu-rerun-seed42"},
+        {"task_id": 1, "variant": "historical_scaled_softmax", "seed": 42, "run_name": "ml20m-softmax-per-head-seed42"},
+        {"task_id": 2, "variant": "unscaled_softmax", "seed": 42, "run_name": "ml20m-softmax-per-head-unscaled-seed42"},
+        {"task_id": 3, "variant": "canonical_softmax", "seed": 42, "run_name": "ml20m-softmax-canonical-seed42"}
+      ],
+      "comparisons": [
+        {
+          "id": "historical_scaled_softmax_vs_hstu",
+          "candidate": "historical_scaled_softmax",
+          "baseline": "hstu",
+          "policy": "softmax_descriptive"
+        },
+        {
+          "id": "unscaled_softmax_vs_hstu",
+          "candidate": "unscaled_softmax",
+          "baseline": "hstu",
+          "policy": "softmax_descriptive"
+        },
+        {
+          "id": "canonical_softmax_vs_hstu",
+          "candidate": "canonical_softmax",
+          "baseline": "hstu",
+          "policy": "softmax_descriptive"
+        }
+      ]
+    },
+    "1671931": {
+      "label": "ML-20M LIFT target-regression controls",
+      "job_id": "1671931",
+      "snapshot": {
+        "root": "/checkpoints/ngocbh/longhstu/code_snapshots/attention_20260812T081127Z_3941628",
+        "manifest_sha256": "606929233889f6843250eebe9055ec68b59652bc9089d1c2fa12c740678f4b7a",
+        "legacy_unmanifested_files": {}
+      },
+      "run_root": "/checkpoints/ngocbh/longhstu/exps/ml-20m-l200",
+      "scheduler": {
+        "job_name": "lift-ml20",
+        "qos": "h200_mrs_shared",
+        "work_dir": "/storage/home/ngocbh/project/gr",
+        "wrapper": {"form": "absolute_snapshot", "token": "/checkpoints/ngocbh/longhstu/code_snapshots/attention_20260812T081127Z_3941628/scripts/sbatch_lift_ml20m.sh"},
+        "snapshot_export": "GR_CODE_SNAPSHOT",
+        "manifest_export_required": true
+      },
+      "overall_policy": "per_comparison_only",
+      "screen_provenance": "no_fixed_screen",
+      "expected_steps": {
+        "start": 0,
+        "end": 100
+      },
+      "variant_metadata": {
+        "full": {"complexity": "quadratic_training_path", "linear_throughput_claim_eligible": false},
+        "local_w32": {"complexity": "quadratic_training_path", "linear_throughput_claim_eligible": false},
+        "lift_w32": {"complexity": "quadratic_training_oracle", "linear_throughput_claim_eligible": false}
+      },
+      "tasks": [
+        {"task_id": 0, "variant": "full", "seed": 42, "run_name": "ml20m-fohstu-full-seed42"},
+        {"task_id": 1, "variant": "local_w32", "seed": 42, "run_name": "ml20m-fohstu-local-w32-seed42"},
+        {"task_id": 2, "variant": "lift_w32", "seed": 42, "run_name": "ml20m-lift-w32-seed42"}
+      ],
+      "comparisons": [
+        {
+          "id": "lift_w32_vs_local_w32",
+          "candidate": "lift_w32",
+          "baseline": "local_w32",
+          "policy": "no_fixed_decision_rule"
+        },
+        {
+          "id": "lift_w32_vs_full",
+          "candidate": "lift_w32",
+          "baseline": "full",
+          "policy": "no_fixed_decision_rule"
+        }
+      ]
+    },
+    "1675026": {
+      "label": "ML-20M raw tanh HSTU arm",
+      "job_id": "1675026",
+      "snapshot": {
+        "root": "/checkpoints/ngocbh/longhstu/code_snapshots/attention_20260812T174536Z_1562368",
+        "manifest_sha256": "1b2222fc25f7a4f4ebe5f59cc1b8150c251d69d64231251ecae6b67fa3e68902",
+        "legacy_unmanifested_files": {}
+      },
+      "run_root": "/checkpoints/ngocbh/longhstu/exps/ml-20m-l200",
+      "scheduler": {
+        "job_name": "hstu-tanh-ml20",
+        "qos": "h200_mrs_shared",
+        "work_dir": "/storage/home/ngocbh/project/gr",
+        "wrapper": {"form": "absolute_snapshot", "token": "/checkpoints/ngocbh/longhstu/code_snapshots/attention_20260812T174536Z_1562368/scripts/sbatch_hstu_tanh_ml20m.sh"},
+        "snapshot_export": "GR_CODE_SNAPSHOT",
+        "manifest_export_required": true
+      },
+      "overall_policy": "per_comparison_only",
+      "screen_provenance": "no_fixed_screen",
+      "expected_steps": {
+        "start": 0,
+        "end": 100
+      },
+      "variant_metadata": {
+        "tanh": {"complexity": "quadratic_pairwise", "linear_throughput_claim_eligible": false}
+      },
+      "tasks": [
+        {"scalar": true, "variant": "tanh", "seed": 42, "run_name": "ml20m-hstu-tanh-attn-seed42"}
+      ],
+      "comparisons": [
+        {
+          "id": "tanh_vs_external_hstu",
+          "candidate": "tanh",
+          "baseline": "hstu_from_different_snapshot",
+          "policy": "cross_snapshot_ineligible"
+        }
+      ]
+    },
+    "1675323": {
+      "label": "ML-1M Signed Additive Feature Attention screen",
+      "job_id": "1675323",
+      "snapshot": {
+        "root": "/checkpoints/ngocbh/longhstu/code_snapshots/attention_20260812T190345Z_1845548",
+        "manifest_sha256": "3063a356500ebec00bb73c5e1051fd4706b505bd1dccb55f7f28cfddf92d038a",
+        "legacy_unmanifested_files": {}
+      },
+      "run_root": "/checkpoints/ngocbh/longhstu/exps/ml-1m-l200",
+      "scheduler": {
+        "job_name": "safa-ml1m",
+        "qos": "h200_mrs_shared",
+        "work_dir": "/storage/home/ngocbh/project/gr",
+        "wrapper": {"form": "absolute_snapshot", "token": "/checkpoints/ngocbh/longhstu/code_snapshots/attention_20260812T190345Z_1845548/scripts/sbatch_signed_additive_ml1m.sh"},
+        "snapshot_export": "GR_CODE_SNAPSHOT",
+        "manifest_export_required": true
+      },
+      "overall_policy": "per_comparison_only",
+      "screen_provenance": "no_fixed_screen",
+      "expected_steps": {
+        "start": 0,
+        "end": 100
+      },
+      "variant_metadata": {
+        "identity": {
+          "complexity": "linear_recurrent",
+          "linear_throughput_claim_eligible": true
+        },
+        "tanh": {
+          "complexity": "linear_recurrent",
+          "linear_throughput_claim_eligible": true
+        },
+        "abs_tanh": {
+          "complexity": "linear_recurrent",
+          "linear_throughput_claim_eligible": true
+        },
+        "abscoef": {
+          "complexity": "quadratic_oracle",
+          "linear_throughput_claim_eligible": false
+        }
+      },
+      "tasks": [
+        {"task_id": 0, "variant": "identity", "seed": 42, "run_name": "ml1m-safa-identity-seed42"},
+        {"task_id": 1, "variant": "identity", "seed": 43, "run_name": "ml1m-safa-identity-seed43"},
+        {"task_id": 2, "variant": "identity", "seed": 44, "run_name": "ml1m-safa-identity-seed44"},
+        {"task_id": 3, "variant": "tanh", "seed": 42, "run_name": "ml1m-safa-tanh-seed42"},
+        {"task_id": 4, "variant": "tanh", "seed": 43, "run_name": "ml1m-safa-tanh-seed43"},
+        {"task_id": 5, "variant": "tanh", "seed": 44, "run_name": "ml1m-safa-tanh-seed44"},
+        {"task_id": 6, "variant": "abs_tanh", "seed": 42, "run_name": "ml1m-safa-abs-tanh-seed42"},
+        {"task_id": 7, "variant": "abs_tanh", "seed": 43, "run_name": "ml1m-safa-abs-tanh-seed43"},
+        {"task_id": 8, "variant": "abs_tanh", "seed": 44, "run_name": "ml1m-safa-abs-tanh-seed44"},
+        {"task_id": 9, "variant": "abscoef", "seed": 42, "run_name": "ml1m-safa-abscoef-oracle-seed42"},
+        {"task_id": 10, "variant": "abscoef", "seed": 43, "run_name": "ml1m-safa-abscoef-oracle-seed43"},
+        {"task_id": 11, "variant": "abscoef", "seed": 44, "run_name": "ml1m-safa-abscoef-oracle-seed44"}
+      ],
+      "comparisons": [
+        {
+          "id": "tanh_vs_identity",
+          "candidate": "tanh",
+          "baseline": "identity",
+          "policy": "no_fixed_decision_rule"
+        },
+        {
+          "id": "abs_tanh_vs_identity",
+          "candidate": "abs_tanh",
+          "baseline": "identity",
+          "policy": "no_fixed_decision_rule"
+        },
+        {
+          "id": "abscoef_vs_identity",
+          "candidate": "abscoef",
+          "baseline": "identity",
+          "policy": "no_fixed_decision_rule"
+        }
+      ]
+    },
+    "1675705": {
+      "label": "ML-1M Signed-LIFT tail feature screen",
+      "job_id": "1675705",
+      "snapshot": {
+        "root": "/checkpoints/ngocbh/longhstu/code_snapshots/attention_20260812T202127Z_2124286",
+        "manifest_sha256": "4ae6b5dbb9bd1d1706d0f6569a08c69febd5ba575784efc20b7b4e79fb01c75a",
+        "legacy_unmanifested_files": {}
+      },
+      "run_root": "/checkpoints/ngocbh/longhstu/exps/ml-1m-l200",
+      "scheduler": {
+        "job_name": "signed-lift-ml1m",
+        "qos": "h200_mrs_shared",
+        "work_dir": "/storage/home/ngocbh/project/gr",
+        "wrapper": {"form": "absolute_snapshot", "token": "/checkpoints/ngocbh/longhstu/code_snapshots/attention_20260812T202127Z_2124286/scripts/sbatch_signed_lift_ml1m.sh"},
+        "snapshot_export": "GR_CODE_SNAPSHOT",
+        "manifest_export_required": true
+      },
+      "overall_policy": "per_comparison_only",
+      "screen_provenance": "pre_submission_fixed_screen",
+      "expected_steps": {
+        "start": 0,
+        "end": 100
+      },
+      "variant_metadata": {
+        "local": {"complexity": "quadratic_training_path", "linear_throughput_claim_eligible": false},
+        "identity": {"complexity": "quadratic_training_oracle", "linear_throughput_claim_eligible": false},
+        "tanh": {"complexity": "quadratic_training_oracle", "linear_throughput_claim_eligible": false},
+        "abs_tanh": {"complexity": "quadratic_training_oracle", "linear_throughput_claim_eligible": false}
+      },
+      "tasks": [
+        {"task_id": 0, "variant": "local", "seed": 42, "run_name": "ml1m-signed-lift-local-w32-seed42"},
+        {"task_id": 1, "variant": "local", "seed": 43, "run_name": "ml1m-signed-lift-local-w32-seed43"},
+        {"task_id": 2, "variant": "local", "seed": 44, "run_name": "ml1m-signed-lift-local-w32-seed44"},
+        {"task_id": 3, "variant": "identity", "seed": 42, "run_name": "ml1m-signed-lift-identity-w32-seed42"},
+        {"task_id": 4, "variant": "identity", "seed": 43, "run_name": "ml1m-signed-lift-identity-w32-seed43"},
+        {"task_id": 5, "variant": "identity", "seed": 44, "run_name": "ml1m-signed-lift-identity-w32-seed44"},
+        {"task_id": 6, "variant": "tanh", "seed": 42, "run_name": "ml1m-signed-lift-tanh-w32-seed42"},
+        {"task_id": 7, "variant": "tanh", "seed": 43, "run_name": "ml1m-signed-lift-tanh-w32-seed43"},
+        {"task_id": 8, "variant": "tanh", "seed": 44, "run_name": "ml1m-signed-lift-tanh-w32-seed44"},
+        {"task_id": 9, "variant": "abs_tanh", "seed": 42, "run_name": "ml1m-signed-lift-abs-tanh-w32-seed42"},
+        {"task_id": 10, "variant": "abs_tanh", "seed": 43, "run_name": "ml1m-signed-lift-abs-tanh-w32-seed43"},
+        {"task_id": 11, "variant": "abs_tanh", "seed": 44, "run_name": "ml1m-signed-lift-abs-tanh-w32-seed44"}
+      ],
+      "comparisons": [
+        {
+          "id": "identity_vs_local",
+          "candidate": "identity",
+          "baseline": "local",
+          "policy": "fixed_tail_screen",
+          "expected_seeds": [42, 43, 44]
+        },
+        {
+          "id": "tanh_vs_local",
+          "candidate": "tanh",
+          "baseline": "local",
+          "policy": "fixed_tail_screen",
+          "expected_seeds": [42, 43, 44]
+        },
+        {
+          "id": "abs_tanh_vs_local",
+          "candidate": "abs_tanh",
+          "baseline": "local",
+          "policy": "fixed_tail_screen",
+          "expected_seeds": [42, 43, 44]
+        },
+        {
+          "id": "tanh_vs_abs_tanh",
+          "candidate": "tanh",
+          "baseline": "abs_tanh",
+          "policy": "fixed_signed_geometry_screen",
+          "expected_seeds": [42, 43, 44]
+        }
+      ]
+    }
+  },
+  "policies": {
+    "fixed_tail_screen": {
+      "type": "fixed_tail_screen",
+      "metric": "eval_epoch/ndcg@10.tail_mean_steps_96_100",
+      "required_pairs": 3,
+      "mean_delta_min": 0.002,
+      "positive_fraction_min": 0.6666666666666666,
+      "min_delta_min": -0.001
+    },
+    "fixed_signed_geometry_screen": {
+      "type": "fixed_positive_fraction_screen",
+      "metric": "eval_epoch/ndcg@10.tail_mean_steps_96_100",
+      "required_pairs": 3,
+      "positive_fraction_min": 0.6666666666666666
+    },
+    "softmax_descriptive": {
+      "type": "insufficient_seeds",
+      "metric": "eval_epoch/ndcg@10.tail_mean_steps_96_100",
+      "minimum_pairs": 3
+    },
+    "no_fixed_decision_rule": {
+      "type": "no_fixed_decision_rule",
+      "metric": "eval_epoch/ndcg@10.tail_mean_steps_96_100"
+    },
+    "cross_snapshot_ineligible": {
+      "type": "cross_snapshot_ineligible",
+      "metric": "eval_epoch/ndcg@10.tail_mean_steps_96_100"
+    }
+  }
+}

@@ -1,0 +1,56 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# KDA (Kimi Delta Attention) — linear-attention drop-in replacement for HSTU,
+# matched to the *HSTU-large* config (configs/ml-1m/hstu-sampled-softmax-n128-large-final.gin).
+# Everything except the sequence mixer is identical to that HSTU config, so this
+# isolates HSTU (softmax-free quadratic attention) vs KDA (gated delta-rule
+# linear attention) at matched parameter count on ML-1M.
+#
+# Mixer hyperparameters are chosen to match HSTU-large's mixer param count and
+# to mirror its depth/head shape; see scripts/kda_check.py.
+#   HSTU-large mixer = 104,800 params;  this KDA = 105,714 params (+0.9%).
+#
+# Run as:
+#   GR_WANDB_ENABLED=1 bash scripts/train.sh research \
+#       configs/ml-1m/kda-sampled-softmax-n128-large-final.gin --master_port=12402
+
+train_fn.dataset_name = "ml-1m"
+train_fn.max_sequence_length = 200
+train_fn.local_batch_size = 128
+
+train_fn.main_module = "KDA"
+train_fn.dropout_rate = 0.2
+train_fn.user_embedding_norm = "l2_norm"
+train_fn.num_epochs = 101
+train_fn.item_embedding_dim = 50
+
+# --- KDA mixer (matched to HSTU-large mixer=104,800; this=105,714, +0.9%) ---
+# Mirrors HSTU-large's depth/heads (8 blocks x 2 heads x d25) with 7 blocks x
+# 2 heads x head_dim 24.
+kda_encoder.num_blocks = 7
+kda_encoder.num_heads = 2
+kda_encoder.head_dim = 24
+kda_encoder.expand_v = 1.0
+kda_encoder.use_short_conv = True
+kda_encoder.conv_size = 4
+kda_encoder.kda_dropout_rate = 0.2
+
+train_fn.learning_rate = 1e-3
+train_fn.weight_decay = 0
+train_fn.num_warmup_steps = 0
+
+train_fn.interaction_module_type = "DotProduct"
+train_fn.top_k_method = "MIPSBruteForceTopK"
+
+train_fn.loss_module = "SampledSoftmaxLoss"
+train_fn.num_negatives = 128
+
+train_fn.sampling_strategy = "local"
+train_fn.temperature = 0.05
+train_fn.item_l2_norm = True
+train_fn.l2_norm_eps = 1e-6
+
+train_fn.enable_tf32 = True
+
+create_data_loader.prefetch_factor = 128
+create_data_loader.num_workers = 8

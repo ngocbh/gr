@@ -1,0 +1,50 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# IsoKLA (Isotropic Kalman Linear Attention, from hyper-delta-net / Gated
+# DeltaNet-2) as the sequence mixer, matched to the HSTU/KDA base config.
+# Same recipe as configs/ml-1m/kda-sampled-softmax-n128-final.gin but with the
+# KDA block swapped for IsoKalmanLinearAttention (kla_variant="iso"): KDA's exact
+# peripherals + an additive-Kalman scalar write gate beta_t (fast Triton
+# iso_beta_chunk scan). +~100 params vs KDA, so still ~matched to HSTU base.
+#
+# Run: GR_WANDB_ENABLED=1 bash scripts/train.sh research \
+#   configs/ml-1m/kla-iso-final.gin --master_port=12430
+
+train_fn.dataset_name = "ml-1m"
+train_fn.max_sequence_length = 200
+train_fn.local_batch_size = 128
+
+train_fn.main_module = "KDA"
+train_fn.dropout_rate = 0.2
+train_fn.user_embedding_norm = "l2_norm"
+train_fn.num_epochs = 101
+train_fn.item_embedding_dim = 50
+
+kda_encoder.kla_variant = "iso"
+kda_encoder.num_blocks = 3
+kda_encoder.num_heads = 1
+kda_encoder.head_dim = 24
+kda_encoder.expand_v = 1.0
+kda_encoder.use_short_conv = True
+kda_encoder.conv_size = 4
+kda_encoder.kda_dropout_rate = 0.2
+
+train_fn.learning_rate = 1e-3
+train_fn.weight_decay = 0
+train_fn.num_warmup_steps = 0
+
+train_fn.interaction_module_type = "DotProduct"
+train_fn.top_k_method = "MIPSBruteForceTopK"
+
+train_fn.loss_module = "SampledSoftmaxLoss"
+train_fn.num_negatives = 128
+
+train_fn.sampling_strategy = "local"
+train_fn.temperature = 0.05
+train_fn.item_l2_norm = True
+train_fn.l2_norm_eps = 1e-6
+
+train_fn.enable_tf32 = True
+
+create_data_loader.prefetch_factor = 128
+create_data_loader.num_workers = 8

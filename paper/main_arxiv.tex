@@ -1,0 +1,411 @@
+\RequirePackage[svgnames,table]{xcolor}
+
+\documentclass[11pt,letterpaper,logo]{yalearxiv}
+
+\input{preamble}
+\input{command}
+
+\title{Signed Additive Forgetting Attention for Generative Recommendation}
+\runningtitle{Signed Additive Forgetting Attention}
+
+\definecolor{yaleblue}{RGB}{0,58,112}
+\newcommand{\yale}{%
+  \textsuperscript{%
+    {\usefont{T1}{pbk}{m}{n}\textcolor{yaleblue}{\textbf{Y}}}%
+  }%
+}
+\newcommand{\LN}{\operatorname{LN}}
+
+\author{Ngoc Bui\yale, Rex Ying\yale\\
+\yale Department of Computer Science, Yale University\\
+\faGithub~\textbf{Base HSTU code:}
+\href{https://github.com/facebookresearch/generative-recommenders}{%
+\texttt{facebookresearch/generative-recommenders}}; SAFA artifact pending
+}
+
+\hypersetup{
+  pdftitle={Signed Additive Forgetting Attention for Generative Recommendation},
+  pdfauthor={Ngoc Bui and Rex Ying},
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  citecolor=blue!50!black,
+  urlcolor=blue!50!black
+}
+
+\begin{abstract}
+\vspace{-1mm}
+{\centering\section*{Abstract}}
+HSTU preserves explicit item pairs, signed SiLU coefficients, pairwise time and
+position bias, and unnormalized value superposition.  We ask whether
+content-dependent forgetting can improve this mixer without discarding its
+explicit pairs.  \emph{Signed Additive Forgetting Attention} (SAFA)
+multiplies each HSTU pair coefficient by learned survival across the
+intervening events.  It retains negative relevance and additive evidence while
+introducing data-dependent intent boundaries.  SAFA is deliberately an
+explicit-pair, quadratic attention rule; ``additive'' does not denote a
+complexity claim.
+On MovieLens-1M, preliminary three-seed SAFA reaches $0.19569$ mean NDCG@10
+versus $0.19022$ for separate raw-HSTU controls.  Because those HSTU controls have 416 fewer
+parameters and ran as separate jobs, this prioritizes SAFA but does not close
+the claim.  We define an exact-inventory matched HSTU--SAFA A/B, with a frozen
+paired-seed decision rule, as the required test.
+\end{abstract}
+
+\keywords{generative recommendation, HSTU, signed attention, selective
+forgetting, sequential recommendation}
+
+\begin{document}
+
+\maketitle
+
+
+% =============================================================================
+\section{Question and Current Evidence}
+\label{sec:question}
+
+For a causal sequence, suppressing batch indices, write a broad class of
+mixers as
+\begin{equation}
+  \ve z_i = \LN\!\left(\sum_{j\leq i} a_{ij}\ve v_j\right),
+  \qquad
+  \ve y_i = \ve x_i + W_o(\ve u_i\odot \ve z_i).
+  \label{eq:generic-mixer}
+\end{equation}
+The question is which properties of $a_{ij}$ matter for recommendation and how
+forgetting should act on those coefficients.
+
+The research HSTU in this repository \citep{zhai2024actions} uses
+\begin{equation}
+  a^{\mathrm H,h}_{ij}
+  = \frac{M_{ij}}{N}\,
+    \silu\!\left((\ve q_i^h)^\tr\ve k_j^h+b_{ij}\right),
+  \label{eq:hstu}
+\end{equation}
+where $h$ indexes heads, $M$ is the causal mask, and $b_{ij}$ contains learned
+relative position and time features.  This rule is explicit-pair and signed.
+
+The motivating MovieLens-20M runs \citep{harper2015movielens} are informative
+but not a valid proof that
+Equation~\eqref{eq:hstu} beats softmax.  The element-wise run
+\texttt{azixyn0z} stopped after epoch 60.  Its best NDCG@10 was $0.208284$ at
+epoch 59.  The softmax run \texttt{dneoj5eq} reached $0.209957$ at epoch 100;
+at the matched epoch 60, element-wise attention was ahead by $0.001804$.
+However, the softmax branch formed one dot product over all $H d_k$ channels
+and shared one attention matrix across heads, whereas HSTU formed $H$
+independent $d_k$-dimensional matrices.  It also divided the $H d_k$ dot
+product by $\sqrt{d_k}$.  Thus the run confounds normalization, head structure,
+and logit scale.  Section~\ref{sec:experiments} defines the required rerun.
+
+
+% =============================================================================
+\section{First Principles}
+\label{sec:principles}
+
+\subsection{The softmax denominator nearly cancels}
+
+Softmax gives
+\begin{equation}
+  a^{\mathrm S,h}_{ij}
+  = \frac{M_{ij}\exp(s^h_{ij})}
+    {\sum_{\ell\leq i}M_{i\ell}\exp(s^h_{i\ell})},
+  \qquad
+  s^h_{ij}=\frac{(\ve q_i^h)^\tr\ve k_j^h+b_{ij}}{\tau}.
+  \label{eq:softmax}
+\end{equation}
+For one head, let $\ve r_i=\sum_{j\leq i}\exp(s_{ij})\ve v_j$ and
+$Z_i=\sum_{j\leq i}\exp(s_{ij})$.  In the HSTU shell,
+\begin{equation}
+  \LN\!\left(\frac{\ve r_i}{Z_i}\right)=\LN(\ve r_i)
+  \label{eq:ln-cancels}
+\end{equation}
+for positive $Z_i$, exactly when the LayerNorm epsilon is zero and to high
+accuracy away from a zero-variance aggregate otherwise.  With $H>1$, the code
+applies one LayerNorm to the concatenation
+$[\ve r_i^1/Z_i^1;\ldots;\ve r_i^H/Z_i^H]$, so unequal denominators can
+rebalance heads.  They still cannot change the token-mixture direction inside
+a head.  The historical collapsed-head softmax used one shared $Z_i$, for
+which Equation~\eqref{eq:ln-cancels} applies to the entire concatenated vector.
+Thus ``competition'' is at most a cross-head scaling effect in the corrected
+control, not a complete explanation of the token mixer.
+
+For any pointwise kernel $\kappa$, repeating a score-value pair $m$ times gives
+the pre-normalization term $m\kappa(s)\ve v$.  Both exponential and SiLU
+kernels accumulate multiplicity relative to other value directions.  Their
+meaningful difference is kernel geometry: $\exp(s)$ is positive and grows
+exponentially, whereas $\silu(s)$ is signed, suppresses large negative scores,
+and is asymptotically linear for positive scores.  Score temperature and
+relative bias interact with this geometry and must be controlled empirically.
+
+The usual $\tau=\sqrt{d_k}$ assumes roughly unit-variance linear query and key
+coordinates.  It is not scale-neutral in this shell.  For the MovieLens-20M
+initialization, $D(0.02)^2=0.1024$ before SiLU and
+$\mathbb{E}[\silu(z)^2]\simeq0.0274$, giving
+$\operatorname{std}((\ve q^h)^\tr\ve k^h)\simeq0.153$ at $d_k=32$; division by
+$\sqrt{32}$ shrinks this to roughly $0.027$.  Moreover, the historical code
+uses $(qk+b)/\sqrt{d_k}$, whereas the usual relative-bias convention is
+$qk/\sqrt{d_k}+b$.  These are distinct controls, not implementation details.
+
+This suggests the first hypothesis.
+
+\begin{quote}
+\textbf{H1 (signed pair-kernel geometry).}  Recommendation benefits from
+query-specific, signed, explicit-pair aggregation and the moderate positive
+tail of SiLU, rather than from removing softmax's row denominator.
+\end{quote}
+
+\subsection{Forgetting while retaining explicit pairs}
+
+Old events can become irrelevant when user intent changes.  A scalar per-head
+forget gate $f_t^h\in(0,1]$ defines the survival of event $j$ at query $i$,
+\begin{equation}
+  F^h_{ij}=\prod_{\ell=j+1}^{i}f_\ell^h,
+  \qquad F^h_{ii}=1.
+  \label{eq:survival}
+\end{equation}
+This is the bridge used by the Forgetting Transformer (FoX): multiplying an
+exponential kernel by $F_{ij}$ is equivalent to adding $\log F_{ij}$ to its
+softmax logit \citep{lin2025forgetting}.  The same survival process can be
+applied to HSTU without changing its explicit-pair representation.
+
+There is an important asymmetry.  Write $\log F^h_{ij}=P_i^h-P_j^h$ for
+prefix log-survival.  In row softmax, $P_i^h$ cancels, so FoSoftmax is exactly
+$\softmax_j(s^h_{ij}-P_j^h)$: it redistributes mass among keys but cannot
+suppress a head's total amplitude.  With a fixed gate it reduces to a
+head-specific linear recency bias.  Neither cancellation occurs when
+$F^h_{ij}$ multiplies HSTU's unnormalized signed coefficients.
+
+\begin{quote}
+\textbf{H2 (selective intent boundaries).}  The useful temporal inductive bias
+is data-dependent forgetting across intervening events while retaining HSTU's
+explicit pairs.
+\end{quote}
+
+
+% =============================================================================
+\section{Signed Additive Forgetting Attention}
+\label{sec:safa}
+
+We propose Signed Additive Forgetting Attention (SAFA),
+\begin{align}
+  f_i^h &= \sigma((\ve w_f^h)^\tr\ve k_i^h+c_h),
+  \label{eq:forget-gate}\\
+  a^{\mathrm{SAFA},h}_{ij}
+    &= \frac{M_{ij}}{N}\,F^h_{ij}\,
+       \silu\!\left((\ve q_i^h)^\tr\ve k_j^h+b_{ij}\right).
+  \label{eq:safa}
+\end{align}
+Earlier experiment configs and checkpoints call this same mechanism
+\texttt{FoHSTU}; we retain that string only as a provenance identifier.
+It has four useful properties.  First, $f_i^h=1$ recovers HSTU, so the proposal
+is nested rather than a new block topology.  Second, multiplication preserves
+the sign of every SiLU coefficient.  Third, each head can learn a different
+content-dependent horizon.  Fourth, the pairwise position/time bias remains
+available; the gate adds path information from the events between $j$ and
+$i$, which an endpoint-only relative bias cannot represent.
+
+\paragraph{Why signed and additive.}
+Conditioned on the realized gates, SAFA aggregates
+\begin{equation}
+  \ve z_i^h=\sum_{j\leq i}a^{\mathrm{SAFA},h}_{ij}\ve v_j^h.
+\end{equation}
+There is no row denominator: a second supportive event adds another value
+contribution instead of taking probability mass from the first.  Negative
+SiLU coefficients can subtract an anti-aligned value direction, while
+$F_{ij}^h\geq0$ attenuates magnitude without changing sign.  Forgetting can
+depend on the intervening sequence, but it does not renormalize the surviving
+keys into competition.  These properties motivate the name Signed Additive
+Forgetting Attention.
+
+\paragraph{Why the gate must be outside SiLU.}
+FoX writes $F\exp(s)=\exp(s+\log F)$.  Copying the logit shift into HSTU would
+give $\silu(s+\log F)$, which is not attenuation by $F$ and can change behavior
+around zero.  More generally, a score shift implements multiplicative survival
+for every $s$ only if a kernel $g$ satisfies
+\begin{equation}
+  g(s+\log F)=F g(s).
+  \label{eq:shift-functional}
+\end{equation}
+Under mild regularity, the solutions are exponential kernels.  SiLU is not
+one.  Equation~\eqref{eq:safa} is therefore the sign-preserving extension of
+forgetting to HSTU.
+
+The projected key is used as the gate input so full and cached incremental
+evaluation share the same state; a separate projection from $\ve x_i$ is a
+straightforward ablation.
+
+\paragraph{Stable initialization.}
+Initialize $\ve w_f^h=0$ and choose head time constants $T_h$ logarithmically
+between $T_{\min}$ and $T_{\max}$.  Setting
+\begin{equation}
+  \bar f_h=e^{-1/T_h},
+  \qquad c_h=\log\frac{\bar f_h}{1-\bar f_h}
+  \label{eq:forget-init}
+\end{equation}
+makes the initial survival $F^h_{ij}=e^{-(i-j)/T_h}$, after which the gate can
+become data-dependent.  For histories of length 200, the first sweep should
+use $T_h$ log-spaced from 8 to 256.  A timestamp-aware extension replaces one
+unit step by a normalized elapsed-time step, but it should be tested only after
+the position-only gate to avoid duplicating the existing time bias.
+
+\paragraph{Exact-inventory matched control.}
+Across $L$ layers, the key-conditioned scalar gate adds exactly
+$LH(d_k+1)$ trainable scalars: 416 for the MovieLens-1M model and 4,224 for
+the MovieLens-20M model.  The clean A/B therefore instantiates the same gate
+parameters in both arms.  SAFA uses Equation~\eqref{eq:forget-gate}; the
+matched HSTU arm forces $F_{ij}^h=1$ and retains a zero-valued dependency on
+the dormant gate so that parameter names and shapes, optimizer parameter-group
+schema and initial state, and the DDP used-parameter set are identical.
+Comparisons with a smaller raw HSTU remain
+capacity-confounded, even when the difference is numerically small.
+
+SAFA remains $O(N^2d)$.  The current reference implementation explicitly
+materializes $F$ and therefore adds $O(BHN^2)$ memory.  A fused implementation
+would store only $O(NH)$ gates and prefix sums, compute
+$\log F_{ij}=P_i^h-P_j^h$ inside each existing score tile, and add one scalar
+multiplication per pair without writing a second $N\times N$ matrix.  The
+immediate goal is quality and causal identification; kernel optimization
+follows only if the hypothesis survives.
+
+
+% =============================================================================
+\section{Experiments That Decide the Hypotheses}
+\label{sec:experiments}
+
+\subsection{Primary exact-inventory matched A/B}
+
+The decisive experiment contains only two model behaviors in one clean HSTU
+implementation.  Both instantiate the forget-gate parameters.  The matched
+HSTU arm forces every survival factor to one; the SAFA arm learns
+Equation~\eqref{eq:forget-gate}.  All other modules, parameter names and
+shapes, initialization order, optimizer configuration and initial state, seed,
+data order, and training steps are identical.  The run must fail closed if the
+trainable inventories differ.  Before training, matched HSTU must equal raw
+HSTU in outputs, loss, every shared-parameter gradient, and one optimizer
+update; dormant gate gradients must be present and exactly zero.  Use paired
+seeds 42--44 on MovieLens-1M for qualification and repeat
+the same frozen configuration on MovieLens-20M.  The primary statistic is
+mean NDCG@10 over epochs 96--100; report the paired per-seed delta, sample
+standard deviation, minimum delta, HR@10, MRR, and equal-work throughput.
+Source, scheduler submission, and event files must be checksum-bound before a
+result is eligible for the paper.
+
+Before inspecting these clean runs, freeze the qualification rule: the mean
+paired SAFA-minus-HSTU NDCG@10 delta must be at least 0.002, at least two of
+three seed deltas must be positive, and no seed may fall below $-0.001$.  A
+failure rejects this SAFA parameterization rather than triggering a gate sweep
+on the same seeds.
+
+\subsection{Separate normalization control}
+
+The historical HSTU--softmax claim requires a same-code-version MovieLens-20M
+control:
+\begin{enumerate}[leftmargin=1.5em]
+  \item HSTU with Equation~\eqref{eq:hstu};
+  \item per-head softmax with logits and values shaped
+    $[B,H,N,N]$ and $[B,N,H,d_v]$, respectively;
+  \item the same relative bias, causal/padding mask before softmax, projections,
+    block count, dimensions, dropout, seed, data order, and 101 epochs;
+  \item historical $(qk+b)/\sqrt{d_k}$ scaling, canonical
+    $qk/\sqrt{d_k}+b$, and an unscaled temperature-one control using the exact
+    HSTU score $qk+b$, so temperature and relative-bias scale do not decide the
+    comparison.
+\end{enumerate}
+Report final epoch, best epoch, matched epoch, matched wall-clock, throughput,
+and at least three seeds before claiming a normalization advantage.  The first
+seed is a regression run; it is not a publication result.
+
+\subsection{Supporting causal controls}
+
+These controls interpret the two-arm A/B; they do not create additional model
+candidates:
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}lYl@{}}
+\toprule
+\textbf{Control} & \textbf{Question} & \textbf{Status} \\
+\midrule
+Raw tanh HSTU & Does a bounded odd pair activation help without forgetting? & running \\
+No relative bias & How much do pairwise time and position contribute? & completed, one seed \\
+Fixed survival & Is a fixed recency prior sufficient? & completed, one seed \\
+FoSoftmax & Is forgetting useful with an exponential kernel? & completed, one seed \\
+Corrected per-head softmax & Does normalization matter after fixing head shape and scale? & submitted/pending \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+For the primary A/B, log per-head gate and survival quantiles, effective
+half-life, negative coefficient mass, performance by history length, and
+elapsed-time gap.  If SAFA passes the frozen rule while fixed survival and
+FoSoftmax do not, the supported mechanism is content-dependent survival acting
+on HSTU's signed, unnormalized coefficients.  Otherwise the result does not
+justify a more complicated gate sweep on the same seeds.
+
+
+% =============================================================================
+\section{Preliminary Results and Limits}
+\label{sec:preliminary}
+
+Job 1671578 ran full SAFA for three
+deterministic MovieLens-1M seeds (42--44, 101 epochs) from one
+checksum-verified source snapshot and common training setup; only full SAFA is
+shown here.  The HSTU row
+comes from separate deterministic control jobs and is not a within-job
+comparison.  Seed 42 comes from job 1671180 and seeds 43--44 from job 1671258;
+their HSTU source hashes begin \texttt{16f8fcd4} and \texttt{399cd3a9}, while
+the SAFA source hash begins \texttt{6e14dd2e}.  No cross-snapshot baseline
+equivalence audit was performed, so the aggregate is descriptive only.
+The primary statistic is the mean over epochs 96--100:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Variant} & \textbf{Mean NDCG@10} & \textbf{Best NDCG@10} & \textbf{epoch-rate examples/s} \\
+\midrule
+HSTU & $0.19022\pm0.00290$ & $0.19235\pm0.00362$ & 821.1 \\
+Full SAFA & $0.19569\pm0.00126$ & $0.19788\pm0.00165$ & 672.6 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This table is not exact-inventory matched: raw HSTU has 313,000 trainable parameters
+on MovieLens-1M and 38,913,120 on MovieLens-20M, whereas SAFA has 313,416 and
+38,917,344.  The additions are only 416 (0.133\%) and 4,224 (0.011\%)
+parameters, but they are nonzero.  The clean exact-inventory matched shell will
+therefore use 313,416 parameters in both MovieLens-1M arms and 38,917,344 in
+both MovieLens-20M arms.
+
+NDCG values are mean $\pm$ sample standard deviation.  Epoch rates are the
+arithmetic mean over epochs 1--100 and then over seeds.  Full SAFA is
+$0.00546$ above the separate raw-HSTU controls on the primary statistic, but
+this is descriptive, not the exact-inventory A/B required by
+Section~\ref{sec:experiments}.
+
+Single-seed controls support the mechanism boundary but are not accuracy
+estimates.  Removing relative bias drops best NDCG@10 to 0.165336.  Unscaled
+per-head softmax reaches 0.195046, while fixed and learned
+FoSoftmax fall to 0.191885/0.190548.  In these controls, forgetting improved
+only when applied to HSTU's signed, unnormalized coefficients; multi-seed
+confirmation remains required.  The corrected,
+same-snapshot MovieLens-20M softmax comparison is submitted and currently
+pending; it is not included here.
+
+
+% =============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+SAFA retains HSTU's explicit pairs, relative time and position, signed SiLU coefficients, and unnormalized
+additive value aggregation, then adds content-dependent survival between each
+key and query.  Preliminary evidence prioritizes this combination: fixed
+forgetting and FoSoftmax controls are consistent with neither mechanism alone
+explaining the observed gain.  These diagnostics motivate SAFA but do not establish its
+advantage.  The next primary claim is narrower: reproduce SAFA against the
+exact-inventory matched HSTU arm on MovieLens-1M and MovieLens-20M before
+optimizing its explicit-pair kernel.
+
+
+\bibliography{main}
+\bibliographystyle{plainnat}
+
+\end{document}

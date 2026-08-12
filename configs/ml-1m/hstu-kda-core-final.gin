@@ -1,0 +1,63 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# HSTU with the attention CORE swapped for KDA's linear attention.
+# This is the *surgical* ablation: identical to the HSTU base config
+# (configs/ml-1m/hstu-sampled-softmax-n128-final.gin) in EVERY way -- same
+# uvqk projection, U-gate, output proj, residual, norms, depth (2 blocks), heads
+# (1), and per-head dims (dqk=dv=50) -- except the token-mixing operator:
+#   HSTU:  attn = SiLU(QKᵀ)/N · V  + relative time/pos bias
+#   here:  attn = KDA gated delta-rule linear scan over the SAME Q, K, V
+#          (adds a per-head β and per-channel forget gate; rel-bias dropped,
+#           since linear attention forms no [N,N] score matrix).
+#
+# It is the SequentialTransductionUnitJagged with normalization="kda" (see
+# research/modeling/sequential/hstu.py), so main_module stays "HSTU".
+#
+# Note on params: the delta-rule gate (β + forget gate + A_log/dt_bias) adds
+# ~2.6k params/block and the relative-pos/time bias is dropped, so the mixer is
+# ~+16% vs HSTU base (30,302 vs 26,200). This keeps HSTU's attention dims
+# EXACTLY; for a param-matched variant see hstu-kda-core-matched-final.gin.
+#
+# Run as:
+#   GR_WANDB_ENABLED=1 bash scripts/train.sh research \
+#       configs/ml-1m/hstu-kda-core-final.gin --master_port=12403
+
+train_fn.dataset_name = "ml-1m"
+train_fn.max_sequence_length = 200
+train_fn.local_batch_size = 128
+
+train_fn.main_module = "HSTU"
+train_fn.dropout_rate = 0.2
+train_fn.user_embedding_norm = "l2_norm"
+train_fn.num_epochs = 101
+train_fn.item_embedding_dim = 50
+
+# Identical to HSTU base, except normalization="kda" and rel-bias off.
+hstu_encoder.num_blocks = 2
+hstu_encoder.num_heads = 1
+hstu_encoder.dqk = 50
+hstu_encoder.dv = 50
+hstu_encoder.linear_dropout_rate = 0.2
+hstu_encoder.normalization = "kda"
+hstu_encoder.enable_relative_attention_bias = False
+hstu_encoder.kda_time_gate = "none"
+
+train_fn.learning_rate = 1e-3
+train_fn.weight_decay = 0
+train_fn.num_warmup_steps = 0
+
+train_fn.interaction_module_type = "DotProduct"
+train_fn.top_k_method = "MIPSBruteForceTopK"
+
+train_fn.loss_module = "SampledSoftmaxLoss"
+train_fn.num_negatives = 128
+
+train_fn.sampling_strategy = "local"
+train_fn.temperature = 0.05
+train_fn.item_l2_norm = True
+train_fn.l2_norm_eps = 1e-6
+
+train_fn.enable_tf32 = True
+
+create_data_loader.prefetch_factor = 128
+create_data_loader.num_workers = 8

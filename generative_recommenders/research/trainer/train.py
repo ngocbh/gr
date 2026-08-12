@@ -22,6 +22,7 @@ from datetime import date
 from typing import Dict, Optional
 
 import gin
+import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -67,6 +68,7 @@ from generative_recommenders.research.modeling.similarity_utils import (
     get_similarity_function,
 )
 from generative_recommenders.research.trainer.data_loader import create_data_loader
+from generative_recommenders.research.trainer.probes import LayerProbe
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
@@ -81,6 +83,24 @@ def setup(rank: int, world_size: int, master_port: int) -> None:
 
 def cleanup() -> None:
     dist.destroy_process_group()
+
+
+def _seed_everything(random_seed: int) -> None:
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(random_seed)
+
+
+def _save_checkpoint_atomic(state: dict, path: str) -> None:
+    """Write a checkpoint to a temp file then atomically replace it.
+
+    Guarantees that an interrupted/pre-empted save never leaves a corrupt file
+    at ``path`` (used by the ``save_last_only`` single-checkpoint path)."""
+    tmp_path = f"{path}.tmp"
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, path)
 
 
 @gin.configurable
@@ -141,9 +161,13 @@ def train_fn(
     wandb_run_name: Optional[str] = None,
     wandb_tags: Optional[list] = None,
     wandb_mode: Optional[str] = None,
+    probe_enabled: bool = False,
+    probe_interval: int = 100,
+    save_last_only: bool = False,
 ) -> None:
-    # to enable more deterministic results.
-    random.seed(random_seed)
+    # Seed before dataset, sampler, and model construction so paired runs share
+    # initialization and data order. This does not force deterministic kernels.
+    _seed_everything(random_seed)
     torch.backends.cuda.matmul.allow_tf32 = enable_tf32
     torch.backends.cudnn.allow_tf32 = enable_tf32
     logging.info(f"cuda.matmul.allow_tf32: {enable_tf32}")
@@ -165,6 +189,7 @@ def train_fn(
         rank=rank,
         shuffle=True,
         drop_last=world_size > 1,
+        seed=random_seed,
     )
     eval_data_sampler, eval_data_loader = create_data_loader(
         dataset.eval_dataset,
@@ -173,6 +198,7 @@ def train_fn(
         rank=rank,
         shuffle=True,  # needed for partial eval
         drop_last=world_size > 1,
+        seed=random_seed,
     )
 
     model_debug_str = main_module
@@ -191,9 +217,9 @@ def train_fn(
         item_embedding_dim=item_embedding_dim,
     )
 
-    assert user_embedding_norm == "l2_norm" or user_embedding_norm == "layer_norm", (
-        f"Not implemented for {user_embedding_norm}"
-    )
+    assert (
+        user_embedding_norm == "l2_norm" or user_embedding_norm == "layer_norm"
+    ), f"Not implemented for {user_embedding_norm}"
     output_postproc_module = (
         L2NormEmbeddingPostprocessor(
             embedding_dim=item_embedding_dim,
@@ -318,11 +344,14 @@ def train_fn(
         logging.info(f"Rank {rank}: writing logs to {log_dir}")
         if wandb_enabled:
             if wandb is None:
-                logging.warning("wandb_enabled=True but wandb is not installed; skipping.")
+                logging.warning(
+                    "wandb_enabled=True but wandb is not installed; skipping."
+                )
                 _wandb_run = None
             else:
                 _wandb_run = wandb.init(
-                    project=wandb_project or os.environ.get("WANDB_PROJECT", "generative-recommenders"),
+                    project=wandb_project
+                    or os.environ.get("WANDB_PROJECT", "generative-recommenders"),
                     entity=wandb_entity or os.environ.get("WANDB_ENTITY"),
                     name=wandb_run_name or model_desc.replace("/", "__"),
                     tags=wandb_tags,
@@ -350,15 +379,37 @@ def train_fn(
                         "world_size": world_size,
                         "random_seed": random_seed,
                         "model_desc": model_desc,
+                        "probe_enabled": probe_enabled,
+                        "probe_interval": probe_interval,
+                        "save_last_only": save_last_only,
                     },
                 )
-                logging.info(f"Rank {rank}: wandb run initialized: {_wandb_run.url if _wandb_run else None}")
+                logging.info(
+                    f"Rank {rank}: wandb run initialized: {_wandb_run.url if _wandb_run else None}"
+                )
         else:
             _wandb_run = None
     else:
         writer = None
         _wandb_run = None
         logging.info(f"Rank {rank}: disabling summary writer")
+
+    # Training-dynamics probe (rank 0 only): per-layer input / pre-residual /
+    # post-residual norms and cos(x_in, x_out) collapse signal, logged to wandb.
+    probe = None
+    if rank == 0 and probe_enabled:
+        try:
+            probe = LayerProbe(model.module)
+            logging.info(
+                f"Rank {rank}: LayerProbe attached to {probe._num_layers} HSTU "
+                f"layers; logging every {probe_interval} step(s)."
+            )
+        except AttributeError as e:
+            logging.warning(
+                f"Rank {rank}: LayerProbe not attached ({e}); "
+                "is main_module=HSTU? Probing disabled."
+            )
+            probe = None
 
     last_training_time = time.time()
     torch.autograd.set_detect_anomaly(True)
@@ -370,6 +421,10 @@ def train_fn(
             train_data_sampler.set_epoch(epoch)
         if eval_data_sampler is not None:
             eval_data_sampler.set_epoch(epoch)
+        torch.cuda.synchronize(device)
+        epoch_wall_start = time.perf_counter()
+        epoch_periodic_eval_seconds = 0.0
+        epoch_train_examples = 0
         model.train()
         for row in iter(train_data_loader):
             seq_features, target_ids, target_ratings = movielens_seq_features_from_row(
@@ -377,8 +432,11 @@ def train_fn(
                 device=device,
                 max_output_length=gr_output_length + 1,
             )
+            epoch_train_examples += int(seq_features.past_lengths.numel()) * world_size
 
             if (batch_id % eval_interval) == 0:
+                torch.cuda.synchronize(device)
+                periodic_eval_start = time.perf_counter()
                 model.eval()
 
                 eval_state = get_eval_state(
@@ -425,15 +483,20 @@ def train_fn(
                 # (Calling _avg inside the rank-0 guard desyncs DDP and hangs.)
                 # pyrefly: ignore [bad-index]
                 eval_ndcg10 = _avg(eval_dict["ndcg@10"], world_size)
-                eval_hr10 = _avg(eval_dict["hr@10"], world_size)  # pyrefly: ignore [bad-index]
-                eval_hr50 = _avg(eval_dict["hr@50"], world_size)  # pyrefly: ignore [bad-index]
-                eval_mrr = _avg(eval_dict["mrr"], world_size)  # pyrefly: ignore [bad-index]
+                eval_hr10 = _avg(
+                    eval_dict["hr@10"], world_size
+                )  # pyrefly: ignore [bad-index]
+                eval_hr50 = _avg(
+                    eval_dict["hr@50"], world_size
+                )  # pyrefly: ignore [bad-index]
+                eval_mrr = _avg(
+                    eval_dict["mrr"], world_size
+                )  # pyrefly: ignore [bad-index]
                 logging.info(
                     f"rank {rank}:  batch-stat (eval): iter {batch_id} (epoch {epoch}): "
                     + f"NDCG@10 {eval_ndcg10:.4f}, "
                     f"HR@10 {eval_hr10:.4f}, "
-                    f"HR@50 {eval_hr50:.4f}, "
-                    + f"MRR {eval_mrr:.4f} "
+                    f"HR@50 {eval_hr50:.4f}, " + f"MRR {eval_mrr:.4f} "
                 )
                 if rank == 0 and _wandb_run is not None:
                     _wandb_run.log(
@@ -446,6 +509,8 @@ def train_fn(
                         step=batch_id,
                     )
                 model.train()
+                torch.cuda.synchronize(device)
+                epoch_periodic_eval_seconds += time.perf_counter() - periodic_eval_start
 
             # TODO: consider separating this out?
             B, N = seq_features.past_ids.shape
@@ -455,6 +520,13 @@ def train_fn(
                 src=target_ids.view(-1, 1),
             )
 
+            # Capture per-layer dynamics only on probe steps; the surrounding
+            # eval forward (above) runs with the probe disabled.
+            if probe is not None:
+                probe.set_enabled(
+                    probe_interval > 0 and (batch_id % probe_interval) == 0
+                )
+
             opt.zero_grad()
             input_embeddings = model.module.get_item_embeddings(seq_features.past_ids)
             seq_embeddings = model(
@@ -463,6 +535,11 @@ def train_fn(
                 past_embeddings=input_embeddings,
                 past_payloads=seq_features.past_payloads,
             )  # [B, X]
+
+            probe_metrics = None
+            if probe is not None and probe.enabled:
+                probe_metrics = probe.collect()
+                probe.set_enabled(False)
 
             supervision_ids = seq_features.past_ids
 
@@ -497,14 +574,17 @@ def train_fn(
                 assert writer is not None
                 writer.add_scalar("losses/ar_loss", loss, batch_id)
                 writer.add_scalar("losses/main_loss", main_loss, batch_id)
+                if probe_metrics:
+                    for probe_key, probe_val in probe_metrics.items():
+                        writer.add_scalar(probe_key, probe_val, batch_id)
                 if _wandb_run is not None:
-                    _wandb_run.log(
-                        {
-                            "losses/ar_loss": float(loss.detach()),
-                            "losses/main_loss": float(main_loss.detach()),
-                        },
-                        step=batch_id,
-                    )
+                    wandb_payload = {
+                        "losses/ar_loss": float(loss.detach()),
+                        "losses/main_loss": float(main_loss.detach()),
+                    }
+                    if probe_metrics:
+                        wandb_payload.update(probe_metrics)
+                    _wandb_run.log(wandb_payload, step=batch_id)
 
             loss.backward()
 
@@ -537,12 +617,22 @@ def train_fn(
 
             batch_id += 1
 
+        torch.cuda.synchronize(device)
+        epoch_train_seconds = max(
+            time.perf_counter() - epoch_wall_start - epoch_periodic_eval_seconds,
+            0.0,
+        )
+        epoch_examples_per_second = epoch_train_examples / max(
+            epoch_train_seconds, 1e-9
+        )
+
         def is_full_eval(epoch: int) -> bool:
             return (epoch % full_eval_every_n) == 0
 
         # eval per epoch
         eval_dict_all = None
-        eval_start_time = time.time()
+        torch.cuda.synchronize(device)
+        eval_start_time = time.perf_counter()
         model.eval()
         eval_state = get_eval_state(
             model=model.module,
@@ -627,7 +717,18 @@ def train_fn(
                 prefix="eval_epoch_full",
                 world_size=world_size,
             )
-        if rank == 0 and epoch > 0 and (epoch % save_ckpt_every_n) == 0:
+        if rank == 0 and save_last_only:
+            # Keep only the latest checkpoint: overwrite a single file each
+            # epoch (atomic write, so a pre-empted save can't corrupt it).
+            _save_checkpoint_atomic(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": opt.state_dict(),
+                },
+                f"{ckpt_prefix}_last.pt",
+            )
+        elif rank == 0 and epoch > 0 and (epoch % save_ckpt_every_n) == 0:
             torch.save(
                 {
                     "epoch": epoch,
@@ -637,10 +738,28 @@ def train_fn(
                 f"{ckpt_prefix}_ep{epoch}",
             )
 
+        torch.cuda.synchronize(device)
+        eval_seconds = time.perf_counter() - eval_start_time
         logging.info(
-            f"rank {rank}: eval @ epoch {epoch} in {time.time() - eval_start_time:.2f}s: "
+            f"rank {rank}: eval @ epoch {epoch} in {eval_seconds:.2f}s: "
             f"NDCG@10 {ndcg_10:.4f}, NDCG@50 {ndcg_50:.4f}, HR@10 {hr_10:.4f}, HR@50 {hr_50:.4f}, MRR {mrr:.4f}"
         )
+        if rank == 0:
+            assert writer is not None
+            writer.add_scalar(
+                "performance/train_epoch_seconds", epoch_train_seconds, epoch
+            )
+            writer.add_scalar(
+                "performance/train_examples_per_second",
+                epoch_examples_per_second,
+                epoch,
+            )
+            writer.add_scalar(
+                "performance/periodic_eval_seconds",
+                epoch_periodic_eval_seconds,
+                epoch,
+            )
+            writer.add_scalar("performance/eval_epoch_seconds", eval_seconds, epoch)
         if rank == 0 and _wandb_run is not None:
             _wandb_run.log(
                 {
@@ -650,6 +769,10 @@ def train_fn(
                     "eval_epoch/hr@50": hr_50,
                     "eval_epoch/mrr": mrr,
                     "epoch": epoch,
+                    "performance/train_epoch_seconds": epoch_train_seconds,
+                    "performance/train_examples_per_second": epoch_examples_per_second,
+                    "performance/periodic_eval_seconds": epoch_periodic_eval_seconds,
+                    "performance/eval_epoch_seconds": eval_seconds,
                 },
                 step=batch_id,
             )
@@ -660,14 +783,26 @@ def train_fn(
             writer.flush()
             writer.close()
 
-        torch.save(
-            {
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": opt.state_dict(),
-            },
-            f"{ckpt_prefix}_ep{epoch}",
-        )
+        if save_last_only:
+            _save_checkpoint_atomic(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": opt.state_dict(),
+                },
+                f"{ckpt_prefix}_last.pt",
+            )
+        else:
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": opt.state_dict(),
+                },
+                f"{ckpt_prefix}_ep{epoch}",
+            )
+        if probe is not None:
+            probe.remove()
         if _wandb_run is not None:
             _wandb_run.finish()
 

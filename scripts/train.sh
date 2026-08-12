@@ -39,6 +39,10 @@ fi
 : "${GR_EXPS_ROOT:=$REPO_ROOT/exps}"
 : "${GR_WANDB_ENABLED:=0}"
 : "${WANDB_MODE:=online}"
+: "${WANDB_PROJECT:=gr}"
+: "${WANDB_ENTITY:=}"
+: "${WANDB_USERNAME:=}"
+: "${WANDB_API_KEY:=}"
 : "${DEBUG:=0}"
 
 # DEBUG=1 forces wandb off everywhere. GR_WANDB_ENABLED is the single switch read
@@ -76,11 +80,17 @@ export WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-60}"
 mkdir -p "$GR_DATA_ROOT" "$GR_CKPTS_ROOT" "$GR_EXPS_ROOT"
 
 # --- activate conda env ---
-if [[ -z "${CONDA_DEFAULT_ENV:-}" || "${CONDA_DEFAULT_ENV}" != "$GR_CONDA_ENV" ]]; then
-  CONDA_BASE="$(conda info --base 2>/dev/null || echo /home/ngocbh/miniconda3)"
-  # shellcheck disable=SC1091
-  source "$CONDA_BASE/etc/profile.d/conda.sh"
-  conda activate "$GR_CONDA_ENV"
+# Activate unconditionally: exported conda labels can be stale in batch jobs.
+# Invoke the environment's interpreter by absolute path because this cluster's
+# inherited PATH can keep /usr/bin ahead of the activated environment.
+CONDA_BASE="$(conda info --base 2>/dev/null || echo /home/ngocbh/miniconda3)"
+# shellcheck disable=SC1091
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$GR_CONDA_ENV"
+PYTHON_BIN="$CONDA_PREFIX/bin/python"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "[train.sh] Python interpreter not found: $PYTHON_BIN" >&2
+  exit 1
 fi
 
 # Workaround for small /tmp on this host (pip / torch dynamo extracts).
@@ -115,10 +125,11 @@ case "$framework" in
     fi
 
     echo "[train.sh] framework=research config=$config_file"
+    echo "[train.sh] python=$PYTHON_BIN"
     echo "[train.sh] GR_EXPS_ROOT=$GR_EXPS_ROOT GR_CKPTS_ROOT=$GR_CKPTS_ROOT"
     echo "[train.sh] wandb_enabled=$GR_WANDB_ENABLED project=$WANDB_PROJECT mode=$WANDB_MODE"
 
-    exec python3 main.py \
+    exec "$PYTHON_BIN" main.py \
       --gin_config_file="$config_file" \
       "${gin_overrides[@]}" \
       "$@"
@@ -130,7 +141,7 @@ case "$framework" in
     mode="${MODE:-train-eval}"
 
     echo "[train.sh] framework=dlrm_v3 dataset=$dataset mode=$mode WORLD_SIZE=${WORLD_SIZE:-1}"
-    exec python3 -m generative_recommenders.dlrm_v3.train.train_ranker \
+    exec "$PYTHON_BIN" -m generative_recommenders.dlrm_v3.train.train_ranker \
       --dataset "$dataset" \
       --mode "$mode" \
       "$@"

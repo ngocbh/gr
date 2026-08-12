@@ -1,0 +1,56 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# HSTU + KDA linear-attention core + TIME-AWARE forget gate.
+# Same as configs/ml-1m/hstu-kda-core-final.gin (HSTU base dims exactly, only the
+# attention operator swapped for KDA's gated delta rule), PLUS the inter-event
+# time gap Δt folded into KDA's forget gate α_t in place of HSTU's rab_time:
+#   g_t = f_proj(x_t) + w ⊙ log1p(Δt_t)   (per-channel w, 0-init -> learns time)
+# A per-step decay α_t=f(Δt_t) yields state decay ~exp(-λ·(ts_i-ts_j)) between
+# positions -- the continuous-time analogue of rab_time's timespan bucket bias.
+#
+# This restores the ONE thing dropping rab lost (time); position is still carried
+# by the input positional embedding + the recurrence. Adds only ~H·dqk params/blk.
+#
+# Run as:
+#   GR_WANDB_ENABLED=1 bash scripts/train.sh research \
+#       configs/ml-1m/hstu-kda-core-time-final.gin --master_port=12405
+
+train_fn.dataset_name = "ml-1m"
+train_fn.max_sequence_length = 200
+train_fn.local_batch_size = 128
+
+train_fn.main_module = "HSTU"
+train_fn.dropout_rate = 0.2
+train_fn.user_embedding_norm = "l2_norm"
+train_fn.num_epochs = 101
+train_fn.item_embedding_dim = 50
+
+# HSTU base dims exactly; KDA core; time-aware forget gate.
+hstu_encoder.num_blocks = 2
+hstu_encoder.num_heads = 1
+hstu_encoder.dqk = 50
+hstu_encoder.dv = 50
+hstu_encoder.linear_dropout_rate = 0.2
+hstu_encoder.normalization = "kda"
+hstu_encoder.enable_relative_attention_bias = False
+hstu_encoder.kda_time_gate = "continuous"
+
+train_fn.learning_rate = 1e-3
+train_fn.weight_decay = 0
+train_fn.num_warmup_steps = 0
+
+train_fn.interaction_module_type = "DotProduct"
+train_fn.top_k_method = "MIPSBruteForceTopK"
+
+train_fn.loss_module = "SampledSoftmaxLoss"
+train_fn.num_negatives = 128
+
+train_fn.sampling_strategy = "local"
+train_fn.temperature = 0.05
+train_fn.item_l2_norm = True
+train_fn.l2_norm_eps = 1e-6
+
+train_fn.enable_tf32 = True
+
+create_data_loader.prefetch_factor = 128
+create_data_loader.num_workers = 8

@@ -15,6 +15,7 @@
 # pyre-unsafe
 
 import gin
+from typing import Optional
 from generative_recommenders.research.modeling.sequential.embedding_modules import (
     EmbeddingModule,
 )
@@ -96,6 +97,16 @@ def hstu_encoder(
     linear_activation: str = "silu",
     concat_ua: bool = False,
     enable_relative_attention_bias: bool = True,
+    kda_time_gate: str = "continuous",
+    kda_gate_rank: int = 0,
+    kda_o_rank: int = 0,
+    kla_omega_coupling: bool = False,
+    forgetting_min_period: float = 8.0,
+    forgetting_max_period: float = 256.0,
+    hybrid_window_size: int = 64,
+    softmax_temperature: float = 0.0,
+    signed_feature_gamma: float = 1.0,
+    hybrid_tail_feature_map: str = "identity",
 ) -> SequentialEncoderWithLearnedSimilarityModule:
     return HSTU(
         embedding_module=embedding_module,
@@ -116,6 +127,16 @@ def hstu_encoder(
         normalization=normalization,
         concat_ua=concat_ua,
         enable_relative_attention_bias=enable_relative_attention_bias,
+        kda_time_gate=kda_time_gate,
+        kda_gate_rank=kda_gate_rank,
+        kda_o_rank=kda_o_rank,
+        kla_omega_coupling=kla_omega_coupling,
+        forgetting_min_period=forgetting_min_period,
+        forgetting_max_period=forgetting_max_period,
+        hybrid_window_size=hybrid_window_size,
+        softmax_temperature=softmax_temperature,
+        signed_feature_gamma=signed_feature_gamma,
+        hybrid_tail_feature_map=hybrid_tail_feature_map,
         verbose=verbose,
     )
 
@@ -288,6 +309,60 @@ def hstu_mhc_encoder(
 
 
 @gin.configurable
+def kda_encoder(
+    max_sequence_length: int,
+    max_output_length: int,
+    embedding_module: EmbeddingModule,
+    similarity_module: SimilarityModule,
+    input_preproc_module: InputFeaturesPreprocessorModule,
+    output_postproc_module: OutputPostprocessorModule,
+    activation_checkpoint: bool,
+    verbose: bool,
+    num_blocks: int = 2,
+    num_heads: int = 1,
+    head_dim: int = 32,
+    expand_v: float = 1.0,
+    num_v_heads: Optional[int] = None,
+    use_short_conv: bool = True,
+    conv_size: int = 4,
+    kda_dropout_rate: float = 0.2,
+    autocast_bf16: bool = True,
+    kla_variant: str = "kda",
+) -> SequentialEncoderWithLearnedSimilarityModule:
+    """Linear-attention encoder; drop-in for hstu_encoder.
+
+    ``kla_variant`` selects the token mixer: "kda" (fla KimiDeltaAttention) or a
+    vendored Kalman Linear Attention block from hyper-delta-net ("iso" =
+    IsoKalmanLinearAttention; "diag"/"exact" once vendored). All subclass KDA, so
+    param count is governed by ``num_blocks`` x (``num_heads`` x ``head_dim``,
+    ``expand_v``). Imported lazily so this module stays importable on GPU-less
+    login nodes (fla imports triton eagerly).
+    """
+    from generative_recommenders.research.modeling.sequential.kda import KDA
+
+    return KDA(
+        embedding_module=embedding_module,
+        similarity_module=similarity_module,  # pyre-ignore [6]
+        input_features_preproc_module=input_preproc_module,
+        output_postproc_module=output_postproc_module,
+        max_sequence_len=max_sequence_length,
+        max_output_len=max_output_length,
+        embedding_dim=embedding_module.item_embedding_dim,
+        num_blocks=num_blocks,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        expand_v=expand_v,
+        num_v_heads=num_v_heads,
+        use_short_conv=use_short_conv,
+        conv_size=conv_size,
+        kda_dropout_rate=kda_dropout_rate,
+        autocast_bf16=autocast_bf16,
+        kla_variant=kla_variant,
+        verbose=verbose,
+    )
+
+
+@gin.configurable
 def get_sequential_encoder(
     module_type: str,
     max_sequence_length: int,
@@ -345,6 +420,17 @@ def get_sequential_encoder(
         )
     elif module_type == "HSTU-mHC":
         model = hstu_mhc_encoder(
+            max_sequence_length=max_sequence_length,
+            max_output_length=max_output_length,
+            embedding_module=embedding_module,
+            similarity_module=interaction_module,
+            input_preproc_module=input_preproc_module,
+            output_postproc_module=output_postproc_module,
+            activation_checkpoint=activation_checkpoint,
+            verbose=verbose,
+        )
+    elif module_type == "KDA":
+        model = kda_encoder(
             max_sequence_length=max_sequence_length,
             max_output_length=max_output_length,
             embedding_module=embedding_module,

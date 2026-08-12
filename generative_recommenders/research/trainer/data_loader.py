@@ -32,6 +32,7 @@ def create_data_loader(
     num_workers: Optional[int] = os.cpu_count(),
     drop_last: bool = False,
     persistent_workers: bool = True,
+    seed: int = 0,
 ) -> Tuple[
     Optional[torch.utils.data.distributed.DistributedSampler[torch.utils.data.Dataset]],
     torch.utils.data.DataLoader,
@@ -42,7 +43,7 @@ def create_data_loader(
             num_replicas=world_size,
             rank=rank,
             shuffle=True,
-            seed=0,
+            seed=seed,
             drop_last=drop_last,
         )
     else:
