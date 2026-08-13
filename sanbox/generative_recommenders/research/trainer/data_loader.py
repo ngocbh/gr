@@ -15,10 +15,20 @@
 # pyre-unsafe
 
 import os
+import random
 from typing import Optional, Tuple
 
 import gin
+import numpy as np
 import torch
+
+
+def _seed_worker(worker_id: int) -> None:
+    del worker_id
+    worker_seed = torch.initial_seed() % (2**32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
 
 
 @gin.configurable
@@ -31,6 +41,7 @@ def create_data_loader(
     prefetch_factor: int = 128,
     num_workers: Optional[int] = os.cpu_count(),
     drop_last: bool = False,
+    seed: int = 0,
 ) -> Tuple[
     Optional[torch.utils.data.distributed.DistributedSampler[torch.utils.data.Dataset]],
     torch.utils.data.DataLoader,
@@ -41,17 +52,22 @@ def create_data_loader(
             num_replicas=world_size,
             rank=rank,
             shuffle=True,
-            seed=0,
+            seed=seed,
             drop_last=drop_last,
         )
     else:
         sampler = None
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        # shuffle=True, cannot use with sampler
-        num_workers=num_workers or 0,
-        sampler=sampler,
-        prefetch_factor=prefetch_factor,
-    )
+    workers = num_workers or 0
+    generator = torch.Generator()
+    generator.manual_seed(seed + rank)
+    data_loader_kwargs = {
+        "batch_size": batch_size,
+        "num_workers": workers,
+        "sampler": sampler,
+        "generator": generator,
+        "worker_init_fn": _seed_worker,
+    }
+    if workers > 0:
+        data_loader_kwargs["prefetch_factor"] = prefetch_factor
+    data_loader = torch.utils.data.DataLoader(dataset, **data_loader_kwargs)
     return sampler, data_loader

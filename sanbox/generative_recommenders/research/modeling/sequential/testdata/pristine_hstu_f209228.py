@@ -146,46 +146,6 @@ class RelativeBucketedTimeAndPositionBasedBias(RelativeAttentionBiasModule):
 HSTUCacheState = Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
 
 
-def _forgetting_log_survival(log_forget: torch.Tensor) -> torch.Tensor:
-    """Returns log path survival, with entry (i, j) summing gates j+1..i."""
-    prefix = torch.cumsum(log_forget.float(), dim=1).transpose(1, 2)
-    return torch.clamp_max(prefix.unsqueeze(-1) - prefix.unsqueeze(-2), 0.0)
-
-
-def _forgetting_survival(log_forget: torch.Tensor) -> torch.Tensor:
-    """Returns path survival factors in float32."""
-    return torch.exp(_forgetting_log_survival(log_forget))
-
-
-def _signed_additive_attention_weights(
-    padded_q: torch.Tensor,
-    padded_k: torch.Tensor,
-    invalid_attn_mask: torch.Tensor,
-    relative_attention_bias: Optional[torch.Tensor],
-    attention_mode: str,
-    forget_weight: torch.Tensor,
-    forget_bias: torch.Tensor,
-) -> torch.Tensor:
-    """Computes per-head HSTU or signed additive forgetting weights."""
-    _, n, num_heads, _ = padded_q.shape
-    qk_attn = torch.einsum("bnhd,bmhd->bhnm", padded_q, padded_k)
-    if relative_attention_bias is not None:
-        qk_attn = qk_attn + relative_attention_bias.unsqueeze(1)
-    qk_attn = F.silu(qk_attn) / n
-
-    if attention_mode == "safa":
-        forget_logits = torch.einsum(
-            "bnhd,hd->bnh", padded_k, forget_weight
-        ) + forget_bias.view(1, 1, num_heads)
-        qk_attn = qk_attn * _forgetting_survival(F.logsigmoid(forget_logits)).to(
-            qk_attn.dtype
-        )
-    elif attention_mode != "hstu":
-        raise ValueError(f"Unknown attention_mode {attention_mode}")
-
-    return qk_attn * invalid_attn_mask.unsqueeze(0).unsqueeze(0)
-
-
 def _hstu_attention_maybe_from_cache(
     num_heads: int,
     attention_dim: int,
@@ -200,9 +160,6 @@ def _hstu_attention_maybe_from_cache(
     all_timestamps: Optional[torch.Tensor],
     invalid_attn_mask: torch.Tensor,
     rel_attn_bias: RelativeAttentionBiasModule,
-    attention_mode: str,
-    forget_weight: torch.Tensor,
-    forget_bias: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B: int = x_offsets.size(0) - 1
     n: int = invalid_attn_mask.size(-1)
@@ -243,17 +200,15 @@ def _hstu_attention_maybe_from_cache(
             values=k, offsets=[x_offsets], max_lengths=[n], padding_value=0.0
         )
 
-    qk_attn = _signed_additive_attention_weights(
-        padded_q=padded_q.view(B, n, num_heads, attention_dim),
-        padded_k=padded_k.view(B, n, num_heads, attention_dim),
-        invalid_attn_mask=invalid_attn_mask,
-        relative_attention_bias=(
-            rel_attn_bias(all_timestamps) if all_timestamps is not None else None
-        ),
-        attention_mode=attention_mode,
-        forget_weight=forget_weight,
-        forget_bias=forget_bias,
+    qk_attn = torch.einsum(
+        "bnhd,bmhd->bhnm",
+        padded_q.view(B, n, num_heads, attention_dim),
+        padded_k.view(B, n, num_heads, attention_dim),
     )
+    if all_timestamps is not None:
+        qk_attn = qk_attn + rel_attn_bias(all_timestamps).unsqueeze(1)
+    qk_attn = F.silu(qk_attn) / n
+    qk_attn = qk_attn * invalid_attn_mask.unsqueeze(0).unsqueeze(0)
     attn_output = torch.ops.fbgemm.dense_to_jagged(
         torch.einsum(
             "bhnm,bmhd->bnhd",
@@ -283,18 +238,14 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
         concat_ua: bool = False,
         epsilon: float = 1e-6,
         max_length: Optional[int] = None,
-        attention_mode: str = "hstu",
     ) -> None:
         super().__init__()
-        if attention_mode not in ("hstu", "safa"):
-            raise ValueError(f"Unknown attention_mode {attention_mode}")
         self._embedding_dim: int = embedding_dim
         self._linear_dim: int = linear_hidden_dim
         self._attention_dim: int = attention_dim
         self._dropout_ratio: float = dropout_ratio
         self._attn_dropout_ratio: float = attn_dropout_ratio
         self._num_heads: int = num_heads
-        self._attention_mode: str = attention_mode
         self._rel_attn_bias: Optional[RelativeAttentionBiasModule] = (
             relative_attention_bias_module
         )
@@ -320,19 +271,6 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
         )
         torch.nn.init.xavier_uniform_(self._o.weight)
         self._eps: float = epsilon
-
-        periods = torch.logspace(
-            math.log10(8.0),
-            math.log10(256.0),
-            steps=num_heads,
-            dtype=torch.float32,
-        )
-        self._forget_weight = torch.nn.Parameter(
-            torch.zeros(num_heads, attention_dim, dtype=torch.float32)
-        )
-        self._forget_bias = torch.nn.Parameter(
-            torch.logit(torch.exp(-periods.reciprocal()))
-        )
 
     def _norm_input(self, x: torch.Tensor) -> torch.Tensor:
         return F.layer_norm(x, normalized_shape=[self._embedding_dim], eps=self._eps)
@@ -418,10 +356,58 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
                 all_timestamps=all_timestamps,
                 invalid_attn_mask=invalid_attn_mask,
                 rel_attn_bias=self._rel_attn_bias,
-                attention_mode=self._attention_mode,
-                forget_weight=self._forget_weight,
-                forget_bias=self._forget_bias,
             )
+        elif self._normalization == "softmax_rel_bias":
+            if delta_x_offsets is not None:
+                B = x_offsets.size(0) - 1
+                padded_q, padded_k = cached_q, cached_k
+                flattened_offsets = delta_x_offsets[1] + torch.arange(
+                    start=0,
+                    end=B * n,
+                    step=n,
+                    device=delta_x_offsets[1].device,
+                    dtype=delta_x_offsets[1].dtype,
+                )
+                assert padded_q is not None
+                assert padded_k is not None
+                padded_q = (
+                    padded_q.view(B * n, -1)
+                    .index_copy_(
+                        dim=0,
+                        index=flattened_offsets,
+                        source=q,
+                    )
+                    .view(B, n, -1)
+                )
+                padded_k = (
+                    padded_k.view(B * n, -1)
+                    .index_copy_(
+                        dim=0,
+                        index=flattened_offsets,
+                        source=k,
+                    )
+                    .view(B, n, -1)
+                )
+            else:
+                padded_q = torch.ops.fbgemm.jagged_to_padded_dense(
+                    values=q, offsets=[x_offsets], max_lengths=[n], padding_value=0.0
+                )
+                padded_k = torch.ops.fbgemm.jagged_to_padded_dense(
+                    values=k, offsets=[x_offsets], max_lengths=[n], padding_value=0.0
+                )
+
+            qk_attn = torch.einsum("bnd,bmd->bnm", padded_q, padded_k)
+            if self._rel_attn_bias is not None:
+                qk_attn = qk_attn + self._rel_attn_bias(all_timestamps)
+            qk_attn = F.softmax(qk_attn / math.sqrt(self._attention_dim), dim=-1)
+            qk_attn = qk_attn * invalid_attn_mask
+            attn_output = torch.ops.fbgemm.dense_to_jagged(
+                torch.bmm(
+                    qk_attn,
+                    torch.ops.fbgemm.jagged_to_padded_dense(v, [x_offsets], [n]),
+                ),
+                [x_offsets],
+            )[0]
         else:
             raise ValueError(f"Unknown normalization method {self._normalization}")
 
@@ -452,12 +438,6 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
             new_outputs = cached_outputs.index_copy_(
                 dim=0, index=delta_x_offsets[0], source=new_outputs
             )
-
-        if self._attention_mode == "hstu":
-            # Keep the matched gate inventory in the graph without changing HSTU.
-            new_outputs = new_outputs + 0.0 * (
-                self._forget_weight.sum() + self._forget_bias.sum()
-            ).to(new_outputs.dtype)
 
         if return_cache_states and delta_x_offsets is None:
             v = v.contiguous()
@@ -593,11 +573,8 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
         enable_relative_attention_bias: bool = True,
         concat_ua: bool = False,
         verbose: bool = True,
-        attention_mode: str = "hstu",
     ) -> None:
         super().__init__(ndp_module=similarity_module)
-        if attention_mode not in ("hstu", "safa"):
-            raise ValueError(f"Unknown attention_mode {attention_mode}")
 
         self._embedding_dim: int = embedding_dim
         self._item_embedding_dim: int = embedding_module.item_embedding_dim
@@ -614,7 +591,6 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
         self._linear_activation: str = linear_activation
         self._linear_dropout_rate: float = linear_dropout_rate
         self._attn_dropout_rate: float = attn_dropout_rate
-        self._attention_mode: str = attention_mode
         self._enable_relative_attention_bias: bool = enable_relative_attention_bias
         self._hstu = HSTUJagged(
             modules=[
@@ -642,7 +618,6 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
                     dropout_ratio=linear_dropout_rate,
                     attn_dropout_ratio=attn_dropout_rate,
                     concat_ua=concat_ua,
-                    attention_mode=attention_mode,
                 )
                 for _ in range(num_blocks)
             ],
@@ -692,8 +667,6 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
         )
         if not self._enable_relative_attention_bias:
             debug_str += "-norab"
-        if self._attention_mode == "safa":
-            debug_str += "-safa"
         return debug_str
 
     def generate_user_embeddings(

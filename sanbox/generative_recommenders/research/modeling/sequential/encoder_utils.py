@@ -87,7 +87,12 @@ def hstu_encoder(
     linear_activation: str = "silu",
     concat_ua: bool = False,
     enable_relative_attention_bias: bool = True,
+    attention_mode: str = "hstu",
 ) -> SequentialEncoderWithLearnedSimilarityModule:
+    if attention_mode not in {"hstu", "safa"}:
+        raise ValueError(
+            f"Unsupported attention_mode {attention_mode!r}; expected 'hstu' or 'safa'"
+        )
     return HSTU(
         embedding_module=embedding_module,
         similarity_module=similarity_module,  # pyre-ignore [6]
@@ -107,6 +112,7 @@ def hstu_encoder(
         normalization=normalization,
         concat_ua=concat_ua,
         enable_relative_attention_bias=enable_relative_attention_bias,
+        attention_mode=attention_mode,
         verbose=verbose,
     )
 

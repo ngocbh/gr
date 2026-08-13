@@ -14,16 +14,27 @@
 
 # pyre-unsafe
 
+import ast
+import hashlib
+import json
 import logging
 import os
 import random
+import re
 import time
 from datetime import date
-from typing import Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import gin
+import numpy as np
 import torch
 import torch.distributed as dist
+
+try:
+    import wandb  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    wandb = None  # type: ignore
 from generative_recommenders.research.data.eval import (
     _avg,
     add_to_summary_writer,
@@ -74,7 +85,127 @@ def setup(rank: int, world_size: int, master_port: int) -> None:
 
 
 def cleanup() -> None:
-    dist.destroy_process_group()
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def _seed_everything(random_seed: int) -> None:
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(random_seed)
+
+
+def _source_provenance() -> Dict[str, str]:
+    source_root = Path(os.environ.get("GR_SOURCE_ROOT", Path.cwd())).resolve()
+    identifiers = {
+        "source_commit": ("GR_SOURCE_COMMIT", "SOURCE_COMMIT"),
+        "source_tree": ("GR_SOURCE_TREE", "SOURCE_TREE"),
+        "source_manifest": (
+            "GR_SOURCE_MANIFEST",
+            "SOURCE_MANIFEST_SHA256",
+        ),
+    }
+    provenance = {"source_root": str(source_root)}
+    for key, (environment_name, filename) in identifiers.items():
+        value = os.environ.get(environment_name)
+        metadata_path = source_root / filename
+        if value is None and metadata_path.is_file():
+            value = metadata_path.read_text(encoding="utf-8").strip()
+        provenance[key] = value or "unavailable"
+    return provenance
+
+
+def _parameter_counts(model: torch.nn.Module) -> Tuple[int, int, str]:
+    total = sum(parameter.numel() for parameter in model.parameters())
+    trainable = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
+    inventory = "\n".join(
+        f"{name}\t{tuple(parameter.shape)}\t{parameter.dtype}\t"
+        f"{parameter.requires_grad}"
+        for name, parameter in sorted(model.named_parameters())
+    )
+    inventory_sha256 = hashlib.sha256(inventory.encode("utf-8")).hexdigest()
+    return total, trainable, inventory_sha256
+
+
+def _attention_mode(main_module: str) -> str:
+    try:
+        mode = gin.query_parameter("hstu_encoder.attention_mode")
+    except ValueError:
+        mode = os.environ.get("GR_ATTENTION_MODE", main_module.lower())
+    return str(mode)
+
+
+_EXPERIMENT_IDENTITY_BINDINGS = (
+    "hstu_encoder.attention_mode",
+    "train_fn.random_seed",
+)
+_OPERATIVE_BINDING_PATTERN = re.compile(
+    r"^(?P<prefix>[ \t]*(?P<binding>"
+    + "|".join(re.escape(binding) for binding in _EXPERIMENT_IDENTITY_BINDINGS)
+    + r")[ \t]*=[ \t]*)(?P<value>[^\r\n]*?)(?P<ending>\r?\n)?$"
+)
+
+
+def _config_identities(
+    resolved_gin_config: str,
+    *,
+    attention_mode: str,
+    random_seed: int,
+) -> Tuple[str, str]:
+    """Hash the exact Gin config and one redacting only the A/B dimensions."""
+    expected_values = {
+        "hstu_encoder.attention_mode": attention_mode,
+        "train_fn.random_seed": random_seed,
+    }
+    found_values: Dict[str, Any] = {}
+    normalized_lines = []
+    for line in resolved_gin_config.splitlines(keepends=True):
+        match = _OPERATIVE_BINDING_PATTERN.fullmatch(line)
+        if match is None:
+            normalized_lines.append(line)
+            continue
+        binding = match.group("binding")
+        if binding in found_values:
+            raise ValueError(f"duplicate operative Gin binding: {binding}")
+        try:
+            found_values[binding] = ast.literal_eval(match.group("value").strip())
+        except (SyntaxError, ValueError) as error:
+            raise ValueError(
+                f"operative Gin binding is not a literal: {binding}"
+            ) from error
+        normalized_lines.append(
+            f"{match.group('prefix')}<redacted>{match.group('ending') or ''}"
+        )
+
+    missing = sorted(set(expected_values) - set(found_values))
+    if missing:
+        raise ValueError(f"missing operative Gin identity bindings: {missing}")
+    for binding, expected_value in expected_values.items():
+        if found_values[binding] != expected_value:
+            raise ValueError(
+                f"operative Gin binding {binding} does not match runtime metadata"
+            )
+
+    exact_sha256 = hashlib.sha256(resolved_gin_config.encode("utf-8")).hexdigest()
+    normalized_config = "".join(normalized_lines)
+    experiment_sha256 = hashlib.sha256(normalized_config.encode("utf-8")).hexdigest()
+    return exact_sha256, experiment_sha256
+
+
+def _synchronize(device: int) -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+
+
+def _wandb_log(run: Any, payload: Dict[str, Any], step: int) -> None:
+    try:
+        run.log(payload, step=step)
+    except Exception as error:
+        logging.warning("Weights & Biases logging failed at step %d: %s", step, error)
 
 
 @gin.configurable
@@ -128,15 +259,28 @@ def train_fn(
     l2_norm_eps: float = 1e-6,
     enable_tf32: bool = False,
     random_seed: int = 42,
+    experiment_name: Optional[str] = None,
+    max_train_batches_per_epoch: Optional[int] = None,
+    max_eval_batches_per_epoch: Optional[int] = None,
+    save_final_checkpoint: bool = True,
+    wandb_enabled: bool = False,
+    wandb_project: Optional[str] = None,
+    wandb_entity: Optional[str] = None,
+    wandb_run_name: Optional[str] = None,
+    wandb_group: Optional[str] = None,
+    wandb_tags: Optional[List[str]] = None,
+    wandb_mode: Optional[str] = None,
 ) -> None:
-    # to enable more deterministic results.
-    random.seed(random_seed)
+    # Seed before dataset, sampler, and model construction so paired runs share
+    # initialization and data order. Kernel determinism remains backend-specific.
+    _seed_everything(random_seed)
     torch.backends.cuda.matmul.allow_tf32 = enable_tf32
     torch.backends.cudnn.allow_tf32 = enable_tf32
     logging.info(f"cuda.matmul.allow_tf32: {enable_tf32}")
     logging.info(f"cudnn.allow_tf32: {enable_tf32}")
     logging.info(f"Training model on rank {rank}.")
-    setup(rank, world_size, master_port)
+    if world_size > 1:
+        setup(rank, world_size, master_port)
 
     dataset = get_reco_dataset(
         dataset_name=dataset_name,
@@ -152,6 +296,7 @@ def train_fn(
         rank=rank,
         shuffle=True,
         drop_last=world_size > 1,
+        seed=random_seed,
     )
     eval_data_sampler, eval_data_loader = create_data_loader(
         dataset.eval_dataset,
@@ -160,6 +305,7 @@ def train_fn(
         rank=rank,
         shuffle=True,  # needed for partial eval
         drop_last=world_size > 1,
+        seed=random_seed,
     )
 
     model_debug_str = main_module
@@ -178,9 +324,9 @@ def train_fn(
         item_embedding_dim=item_embedding_dim,
     )
 
-    assert user_embedding_norm == "l2_norm" or user_embedding_norm == "layer_norm", (
-        f"Not implemented for {user_embedding_norm}"
-    )
+    assert (
+        user_embedding_norm == "l2_norm" or user_embedding_norm == "layer_norm"
+    ), f"Not implemented for {user_embedding_norm}"
     output_postproc_module = (
         L2NormEmbeddingPostprocessor(
             embedding_dim=item_embedding_dim,
@@ -209,6 +355,68 @@ def train_fn(
         verbose=True,
     )
     model_debug_str = model.debug_str()
+    parameter_count, trainable_parameter_count, parameter_inventory_sha256 = (
+        _parameter_counts(model)
+    )
+    attention_mode = _attention_mode(main_module)
+    source_provenance = _source_provenance()
+    resolved_gin_config = gin.operative_config_str()
+    resolved_gin_config_sha256, experiment_config_sha256 = _config_identities(
+        resolved_gin_config,
+        attention_mode=attention_mode,
+        random_seed=random_seed,
+    )
+    expected_experiment_config_sha256 = os.environ.get(
+        "GR_EXPECTED_EXPERIMENT_CONFIG_SHA256"
+    )
+    if expected_experiment_config_sha256 is not None:
+        if re.fullmatch(r"[0-9a-f]{64}", expected_experiment_config_sha256) is None:
+            raise ValueError(
+                "GR_EXPECTED_EXPERIMENT_CONFIG_SHA256 must be a lowercase SHA-256"
+            )
+        if experiment_config_sha256 != expected_experiment_config_sha256:
+            raise ValueError(
+                "operative Gin config does not match the externally pinned "
+                "experiment identity"
+            )
+
+    config_identity_only = os.environ.get("GR_CONFIG_IDENTITY_ONLY", "0")
+    if config_identity_only not in ("0", "1"):
+        raise ValueError("GR_CONFIG_IDENTITY_ONLY must be 0 or 1")
+    if config_identity_only == "1":
+        output = os.environ.get("GR_CONFIG_IDENTITY_OUTPUT")
+        if not output:
+            raise ValueError(
+                "GR_CONFIG_IDENTITY_OUTPUT is required in config-identity-only mode"
+            )
+        if rank == 0:
+            output_path = Path(output).expanduser().absolute()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "attention_mode": attention_mode,
+                        "random_seed": random_seed,
+                        "resolved_gin_config_sha256": resolved_gin_config_sha256,
+                        "experiment_config_sha256": experiment_config_sha256,
+                        **source_provenance,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        if world_size > 1:
+            cleanup()
+        return
+    logging.info(
+        "Model inventory: mode=%s parameters=%d trainable=%d sha256=%s",
+        attention_mode,
+        parameter_count,
+        trainable_parameter_count,
+        parameter_inventory_sha256,
+    )
 
     # loss
     loss_debug_str = loss_module
@@ -261,7 +469,9 @@ def train_fn(
     model = model.to(device)
     ar_loss = ar_loss.to(device)
     negatives_sampler = negatives_sampler.to(device)
-    model = DDP(model, device_ids=[rank], broadcast_buffers=False)
+    model_module = model
+    if world_size > 1:
+        model = DDP(model, device_ids=[rank], broadcast_buffers=False)
 
     # TODO: wrap in create_optimizer.
     opt = torch.optim.AdamW(
@@ -282,15 +492,97 @@ def train_fn(
         model_desc += f"-fe{full_eval_every_n}"
     if positional_sampling_ratio is not None and positional_sampling_ratio < 1:
         model_desc += f"-d{positional_sampling_ratio}"
-    # creates subfolders.
-    os.makedirs(f"./exps/{model_subfolder}", exist_ok=True)
-    os.makedirs(f"./ckpts/{model_subfolder}", exist_ok=True)
-    log_dir = f"./exps/{model_desc}"
+    experiment_name = os.environ.get("GR_EXPERIMENT_NAME") or experiment_name
+    wandb_run_name = os.environ.get("WANDB_NAME") or wandb_run_name
+    wandb_group = os.environ.get("WANDB_RUN_GROUP") or wandb_group
+    if wandb_tags is None and os.environ.get("WANDB_TAGS"):
+        wandb_tags = [
+            tag.strip() for tag in os.environ["WANDB_TAGS"].split(",") if tag.strip()
+        ]
+    if experiment_name:
+        if Path(experiment_name).name != experiment_name:
+            raise ValueError("experiment_name must not contain path separators")
+        model_desc += f"-{experiment_name}"
+
+    exps_root = Path(os.environ.get("GR_EXPS_ROOT", "./exps")).expanduser()
+    ckpts_root = Path(os.environ.get("GR_CKPTS_ROOT", "./ckpts")).expanduser()
+    log_dir = exps_root / model_desc
+    ckpt_prefix = ckpts_root / model_desc
+    (exps_root / model_subfolder).mkdir(parents=True, exist_ok=True)
+    (ckpts_root / model_subfolder).mkdir(parents=True, exist_ok=True)
     if rank == 0:
-        writer = SummaryWriter(log_dir=log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "operative_config.gin").write_text(
+            resolved_gin_config, encoding="utf-8"
+        )
+        (log_dir / "run_metadata.json").write_text(
+            json.dumps(
+                {
+                    "attention_mode": attention_mode,
+                    "random_seed": random_seed,
+                    "resolved_gin_config_sha256": resolved_gin_config_sha256,
+                    "experiment_config_sha256": experiment_config_sha256,
+                    "parameter_count": parameter_count,
+                    "trainable_parameter_count": trainable_parameter_count,
+                    "parameter_inventory_sha256": parameter_inventory_sha256,
+                    **source_provenance,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        writer = SummaryWriter(log_dir=str(log_dir))
         logging.info(f"Rank {rank}: writing logs to {log_dir}")
+        _wandb_run = None
+        if wandb_enabled:
+            if wandb is None:
+                logging.warning(
+                    "wandb_enabled=True but wandb is not installed; continuing without it"
+                )
+            else:
+                wandb_config = {
+                    "dataset_name": dataset_name,
+                    "attention_mode": attention_mode,
+                    "random_seed": random_seed,
+                    "world_size": world_size,
+                    "max_sequence_length": max_sequence_length,
+                    "local_batch_size": local_batch_size,
+                    "eval_batch_size": eval_batch_size,
+                    "num_epochs": num_epochs,
+                    "learning_rate": learning_rate,
+                    "weight_decay": weight_decay,
+                    "parameter_count": parameter_count,
+                    "trainable_parameter_count": trainable_parameter_count,
+                    "parameter_inventory_sha256": parameter_inventory_sha256,
+                    "resolved_gin_config": resolved_gin_config,
+                    "resolved_gin_config_sha256": resolved_gin_config_sha256,
+                    "experiment_config_sha256": experiment_config_sha256,
+                    "data_root": os.environ.get("GR_DATA_ROOT", "./tmp"),
+                    "exps_root": str(exps_root),
+                    "ckpts_root": str(ckpts_root),
+                    **source_provenance,
+                }
+                try:
+                    _wandb_run = wandb.init(
+                        project=wandb_project or os.environ.get("WANDB_PROJECT", "gr"),
+                        entity=wandb_entity or os.environ.get("WANDB_ENTITY"),
+                        name=wandb_run_name or experiment_name or model_desc,
+                        group=wandb_group,
+                        tags=wandb_tags,
+                        mode=wandb_mode or os.environ.get("WANDB_MODE", "online"),
+                        dir=str(log_dir),
+                        config=wandb_config,
+                    )
+                except Exception as error:
+                    logging.warning(
+                        "Weights & Biases initialization failed; continuing without it: %s",
+                        error,
+                    )
     else:
         writer = None
+        _wandb_run = None
         logging.info(f"Rank {rank}: disabling summary writer")
 
     last_training_time = time.time()
@@ -303,24 +595,36 @@ def train_fn(
             train_data_sampler.set_epoch(epoch)
         if eval_data_sampler is not None:
             eval_data_sampler.set_epoch(epoch)
+        _synchronize(device)
+        epoch_wall_start = time.perf_counter()
+        epoch_periodic_eval_seconds = 0.0
+        epoch_train_examples = 0
         model.train()
-        for row in iter(train_data_loader):
+        for train_iter, row in enumerate(iter(train_data_loader)):
+            if (
+                max_train_batches_per_epoch is not None
+                and train_iter >= max_train_batches_per_epoch
+            ):
+                break
             seq_features, target_ids, target_ratings = movielens_seq_features_from_row(
                 row,
                 device=device,
                 max_output_length=gr_output_length + 1,
             )
+            epoch_train_examples += int(seq_features.past_lengths.numel()) * world_size
 
             if (batch_id % eval_interval) == 0:
+                _synchronize(device)
+                periodic_eval_start = time.perf_counter()
                 model.eval()
 
                 eval_state = get_eval_state(
-                    model=model.module,
+                    model=model_module,
                     all_item_ids=dataset.all_item_ids,
                     negatives_sampler=negatives_sampler,
                     top_k_module_fn=lambda item_embeddings, item_ids: get_top_k_module(
                         top_k_method=top_k_method,
-                        model=model.module,
+                        model=model_module,
                         item_embeddings=item_embeddings,
                         item_ids=item_ids,
                     ),
@@ -331,7 +635,7 @@ def train_fn(
                 eval_dict = eval_metrics_v2_from_tensors(
                     eval_state,
                     # pyrefly: ignore [bad-argument-count]
-                    model.module,
+                    model_module,
                     seq_features,
                     # pyrefly: ignore [unexpected-keyword]
                     target_ids=target_ids,
@@ -351,15 +655,33 @@ def train_fn(
                     prefix="eval",
                     world_size=world_size,
                 )
+                # _avg performs a collective, so every rank computes these in
+                # the same order before rank 0 emits external logs.
+                eval_ndcg_10 = _avg(eval_dict["ndcg@10"], world_size)
+                eval_hr_10 = _avg(eval_dict["hr@10"], world_size)
+                eval_hr_50 = _avg(eval_dict["hr@50"], world_size)
+                eval_mrr = _avg(eval_dict["mrr"], world_size)
                 logging.info(
                     f"rank {rank}:  batch-stat (eval): iter {batch_id} (epoch {epoch}): "
-                    # pyrefly: ignore [bad-index]
-                    + f"NDCG@10 {_avg(eval_dict['ndcg@10'], world_size):.4f}, "
-                    f"HR@10 {_avg(eval_dict['hr@10'], world_size):.4f}, "
-                    f"HR@50 {_avg(eval_dict['hr@50'], world_size):.4f}, "
-                    + f"MRR {_avg(eval_dict['mrr'], world_size):.4f} "  # pyrefly: ignore [bad-index]
+                    + f"NDCG@10 {eval_ndcg_10:.4f}, "
+                    f"HR@10 {eval_hr_10:.4f}, "
+                    f"HR@50 {eval_hr_50:.4f}, " + f"MRR {eval_mrr:.4f} "
                 )
+                if rank == 0 and _wandb_run is not None:
+                    _wandb_log(
+                        _wandb_run,
+                        {
+                            "eval/ndcg@10": float(eval_ndcg_10),
+                            "eval/hr@10": float(eval_hr_10),
+                            "eval/hr@50": float(eval_hr_50),
+                            "eval/mrr": float(eval_mrr),
+                            "epoch": epoch,
+                        },
+                        batch_id,
+                    )
                 model.train()
+                _synchronize(device)
+                epoch_periodic_eval_seconds += time.perf_counter() - periodic_eval_start
 
             # TODO: consider separating this out?
             B, N = seq_features.past_ids.shape
@@ -370,7 +692,7 @@ def train_fn(
             )
 
             opt.zero_grad()
-            input_embeddings = model.module.get_item_embeddings(seq_features.past_ids)
+            input_embeddings = model_module.get_item_embeddings(seq_features.past_ids)
             seq_embeddings = model(
                 past_lengths=seq_features.past_lengths,
                 past_ids=seq_features.past_ids,
@@ -386,12 +708,12 @@ def train_fn(
                 negatives_sampler.process_batch(
                     ids=in_batch_ids,
                     presences=(in_batch_ids != 0),
-                    embeddings=model.module.get_item_embeddings(in_batch_ids),
+                    embeddings=model_module.get_item_embeddings(in_batch_ids),
                 )
             else:
                 # pyre-fixme[16]: `InBatchNegativesSampler` has no attribute
                 #  `_item_emb`.
-                negatives_sampler._item_emb = model.module._embedding_module._item_emb
+                negatives_sampler._item_emb = model_module._embedding_module._item_emb
 
             ar_mask = supervision_ids[:, 1:] != 0
             loss, aux_losses = ar_loss(
@@ -433,25 +755,53 @@ def train_fn(
                     assert writer is not None
                     writer.add_scalar("loss/train", loss, batch_id)
                     writer.add_scalar("lr", lr, batch_id)
+                    if _wandb_run is not None:
+                        _wandb_log(
+                            _wandb_run,
+                            {
+                                "loss/train": float(loss.detach()),
+                                "loss/main": float(main_loss.detach()),
+                                "learning_rate": lr,
+                                "epoch": epoch,
+                            },
+                            batch_id,
+                        )
 
             opt.step()
 
             batch_id += 1
+
+        _synchronize(device)
+        epoch_train_seconds = max(
+            time.perf_counter() - epoch_wall_start - epoch_periodic_eval_seconds,
+            0.0,
+        )
+        epoch_examples_per_second = epoch_train_examples / max(
+            epoch_train_seconds, 1e-9
+        )
+        if rank == 0:
+            assert writer is not None
+            writer.add_scalar(
+                "perf/train_examples_per_second",
+                epoch_examples_per_second,
+                epoch,
+            )
 
         def is_full_eval(epoch: int) -> bool:
             return (epoch % full_eval_every_n) == 0
 
         # eval per epoch
         eval_dict_all = None
-        eval_start_time = time.time()
+        _synchronize(device)
+        eval_start_time = time.perf_counter()
         model.eval()
         eval_state = get_eval_state(
-            model=model.module,
+            model=model_module,
             all_item_ids=dataset.all_item_ids,
             negatives_sampler=negatives_sampler,
             top_k_module_fn=lambda item_embeddings, item_ids: get_top_k_module(
                 top_k_method=top_k_method,
-                model=model.module,
+                model=model_module,
                 item_embeddings=item_embeddings,
                 item_ids=item_ids,
             ),
@@ -466,7 +816,7 @@ def train_fn(
             eval_dict = eval_metrics_v2_from_tensors(
                 eval_state,
                 # pyrefly: ignore [bad-argument-count]
-                model.module,
+                model_module,
                 seq_features,
                 # pyrefly: ignore [unexpected-keyword]
                 target_ids=target_ids,
@@ -489,7 +839,17 @@ def train_fn(
                 eval_dict_all[k] = eval_dict_all[k] + [v]
             del eval_dict
 
-            if (eval_iter + 1 >= partial_eval_num_iters) and (not is_full_eval(epoch)):
+            if (
+                max_eval_batches_per_epoch is not None
+                and eval_iter + 1 >= max_eval_batches_per_epoch
+            ):
+                logging.info(
+                    "Truncating epoch %d eval to %d iters for a smoke run.",
+                    epoch,
+                    eval_iter + 1,
+                )
+                break
+            if (eval_iter + 1 >= partial_eval_num_iters) and not is_full_eval(epoch):
                 logging.info(
                     f"Truncating epoch {epoch} eval to {eval_iter + 1} iters to save cost.."
                 )
@@ -534,14 +894,40 @@ def train_fn(
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": opt.state_dict(),
+                    "attention_mode": attention_mode,
+                    "random_seed": random_seed,
+                    "parameter_count": parameter_count,
+                    "parameter_inventory_sha256": parameter_inventory_sha256,
+                    "resolved_gin_config": resolved_gin_config,
+                    "resolved_gin_config_sha256": resolved_gin_config_sha256,
+                    "experiment_config_sha256": experiment_config_sha256,
+                    **source_provenance,
                 },
-                f"./ckpts/{model_desc}_ep{epoch}",
+                f"{ckpt_prefix}_ep{epoch}",
             )
 
+        _synchronize(device)
+        eval_seconds = time.perf_counter() - eval_start_time
         logging.info(
-            f"rank {rank}: eval @ epoch {epoch} in {time.time() - eval_start_time:.2f}s: "
+            f"rank {rank}: eval @ epoch {epoch} in {eval_seconds:.2f}s: "
             f"NDCG@10 {ndcg_10:.4f}, NDCG@50 {ndcg_50:.4f}, HR@10 {hr_10:.4f}, HR@50 {hr_50:.4f}, MRR {mrr:.4f}"
         )
+        if rank == 0 and _wandb_run is not None:
+            _wandb_log(
+                _wandb_run,
+                {
+                    "eval_epoch/ndcg@10": float(ndcg_10),
+                    "eval_epoch/ndcg@50": float(ndcg_50),
+                    "eval_epoch/hr@10": float(hr_10),
+                    "eval_epoch/hr@50": float(hr_50),
+                    "eval_epoch/mrr": float(mrr),
+                    "perf/train_examples_per_second": epoch_examples_per_second,
+                    "perf/train_seconds": epoch_train_seconds,
+                    "perf/eval_seconds": eval_seconds,
+                    "epoch": epoch,
+                },
+                batch_id,
+            )
         last_training_time = time.time()
 
     if rank == 0:
@@ -549,13 +935,28 @@ def train_fn(
             writer.flush()
             writer.close()
 
-        torch.save(
-            {
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": opt.state_dict(),
-            },
-            f"./ckpts/{model_desc}_ep{epoch}",
-        )
+        if save_final_checkpoint:
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": opt.state_dict(),
+                    "attention_mode": attention_mode,
+                    "random_seed": random_seed,
+                    "parameter_count": parameter_count,
+                    "parameter_inventory_sha256": parameter_inventory_sha256,
+                    "resolved_gin_config": resolved_gin_config,
+                    "resolved_gin_config_sha256": resolved_gin_config_sha256,
+                    "experiment_config_sha256": experiment_config_sha256,
+                    **source_provenance,
+                },
+                f"{ckpt_prefix}_ep{epoch}",
+            )
+        if _wandb_run is not None:
+            try:
+                _wandb_run.finish()
+            except Exception as error:
+                logging.warning("Weights & Biases finalization failed: %s", error)
 
-    cleanup()
+    if world_size > 1:
+        cleanup()
