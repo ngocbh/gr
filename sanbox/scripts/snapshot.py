@@ -18,6 +18,7 @@ from typing import Dict, Iterable, Optional, Set, Tuple
 
 EXACT_SOURCE_FILES = (
     "main.py",
+    "preprocess_public_data.py",
     "requirements.txt",
     "generative_recommenders/__init__.py",
 )

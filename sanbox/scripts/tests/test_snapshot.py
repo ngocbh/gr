@@ -22,6 +22,9 @@ class SnapshotTest(unittest.TestCase):
         ):
             directory.mkdir(parents=True, exist_ok=True)
         (self.source / "main.py").write_text("print('main')\n", encoding="utf-8")
+        (self.source / "preprocess_public_data.py").write_text(
+            "print('preprocess')\n", encoding="utf-8"
+        )
         (self.source / "requirements.txt").write_text("torch\n", encoding="utf-8")
         (self.source / "generative_recommenders" / "__init__.py").write_text(
             "", encoding="utf-8"
@@ -58,6 +61,13 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(provenance["source_tree"], "tree-test")
         self.assertRegex(provenance["source_manifest"], r"^[0-9a-f]{64}$")
         self.assertEqual(self.snapshot.stat().st_mode & 0o222, 0)
+
+    def test_research_preprocessor_is_included(self) -> None:
+        self._create()
+        self.assertEqual(
+            (self.snapshot / "preprocess_public_data.py").read_text(encoding="utf-8"),
+            "print('preprocess')\n",
+        )
 
     def test_file_tampering_is_rejected(self) -> None:
         self._create()
