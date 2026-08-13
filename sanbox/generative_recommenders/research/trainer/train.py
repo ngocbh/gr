@@ -117,7 +117,9 @@ def _source_provenance() -> Dict[str, str]:
     return provenance
 
 
-def _slurm_provenance(*, attention_mode: str, random_seed: int) -> Dict[str, Any]:
+def _slurm_provenance(
+    *, attention_mode: str, random_seed: int, dataset_name: str
+) -> Dict[str, Any]:
     """Validate scheduler identity for a full SAFA A/B array run."""
     required = os.environ.get("GR_REQUIRE_SLURM_PROVENANCE", "0")
     if required not in ("0", "1"):
@@ -143,8 +145,14 @@ def _slurm_provenance(*, attention_mode: str, random_seed: int) -> Dict[str, Any
     task_id_string = str(values["slurm_array_task_id"])
     if re.fullmatch(r"[0-5]", task_id_string) is None:
         raise ValueError("slurm_array_task_id must be an integer in [0, 5]")
-    if values["slurm_job_qos"] != "h200_mrs_shared":
-        raise ValueError("full SAFA A/B runs require QoS h200_mrs_shared")
+    required_qos = {
+        "ml-1m": "h200_dev",
+        "ml-20m": "h200_mrs_2_high",
+    }.get(dataset_name)
+    if required_qos is None:
+        raise ValueError(f"unsupported SAFA A/B dataset: {dataset_name}")
+    if values["slurm_job_qos"] != required_qos:
+        raise ValueError(f"{dataset_name} SAFA A/B runs require QoS {required_qos}")
     restart_count_string = str(values["slurm_restart_count"])
     if re.fullmatch(r"0|[1-9][0-9]*", restart_count_string) is None:
         raise ValueError("slurm_restart_count must be a nonnegative integer")
@@ -478,6 +486,7 @@ def train_fn(
     slurm_provenance = _slurm_provenance(
         attention_mode=attention_mode,
         random_seed=random_seed,
+        dataset_name=dataset_name,
     )
     resolved_gin_config = gin.operative_config_str()
     resolved_gin_config_sha256, experiment_config_sha256 = _config_identities(
@@ -637,6 +646,7 @@ def train_fn(
         (log_dir / "run_metadata.json").write_text(
             json.dumps(
                 {
+                    "dataset_name": dataset_name,
                     "attention_mode": attention_mode,
                     "random_seed": random_seed,
                     "resolved_gin_config_sha256": resolved_gin_config_sha256,
@@ -1007,6 +1017,7 @@ def train_fn(
             torch.save(
                 {
                     "epoch": epoch,
+                    "dataset_name": dataset_name,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": opt.state_dict(),
                     "attention_mode": attention_mode,
@@ -1056,6 +1067,7 @@ def train_fn(
             torch.save(
                 {
                     "epoch": epoch,
+                    "dataset_name": dataset_name,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": opt.state_dict(),
                     "attention_mode": attention_mode,

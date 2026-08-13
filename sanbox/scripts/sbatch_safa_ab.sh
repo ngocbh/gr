@@ -2,7 +2,7 @@
 # Paired seed array: task 2k is HSTU and task 2k+1 is SAFA for the same seed.
 #SBATCH --job-name=safa-ab
 #SBATCH --partition=h200
-#SBATCH --qos=h200_mrs_shared
+#SBATCH --qos=h200_dev
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
@@ -81,12 +81,16 @@ if [[ -n "$reported_restart_count" ]]; then
     exit 1
   fi
 fi
-if [[ "$actual_qos" == "h200_dev" ]]; then
-  echo "refusing experiment on h200_dev" >&2
-  exit 1
-fi
-if [[ "$actual_qos" != "h200_mrs_shared" ]]; then
-  echo "experiment requires QoS h200_mrs_shared" >&2
+case "$GR_DATASET" in
+  ml-1m) required_qos="h200_dev" ;;
+  ml-20m) required_qos="h200_mrs_2_high" ;;
+  *)
+    echo "unsupported dataset: $GR_DATASET" >&2
+    exit 2
+    ;;
+esac
+if [[ "$actual_qos" != "$required_qos" ]]; then
+  echo "$GR_DATASET experiment requires QoS $required_qos" >&2
   exit 1
 fi
 if [[ "$actual_partition" != "h200" ]]; then
@@ -96,10 +100,6 @@ fi
 export SLURM_JOB_QOS="$actual_qos"
 export SLURM_JOB_PARTITION="$actual_partition"
 export SLURM_RESTART_COUNT="$actual_restart_count"
-if [[ "$GR_DATASET" != "ml-1m" && "$GR_DATASET" != "ml-20m" ]]; then
-  echo "unsupported dataset: $GR_DATASET" >&2
-  exit 2
-fi
 verifier_python="$(command -v python3)"
 provenance_exports="$($verifier_python "$repo_root/scripts/snapshot.py" verify \
   "$repo_root" --expected-manifest "$GR_EXPECTED_SOURCE_MANIFEST" --shell)"
@@ -120,7 +120,7 @@ for expected_line in \
   "qualification_scope=preflight_only" \
   "source_commit=$GR_SOURCE_COMMIT" \
   "source_tree=$GR_SOURCE_TREE" \
-  "qualification_job_qos=h200_mrs_shared" \
+  "qualification_job_qos=h200_dev" \
   "qualification_job_partition=h200"; do
   if ! grep -Fxq "$expected_line" "$qualification_marker"; then
     echo "qualification marker is incomplete: $expected_line" >&2

@@ -41,12 +41,8 @@ if [[ -n "$reported_partition" && \
   echo "qualification SLURM_JOB_PARTITION disagrees with scheduler state" >&2
   exit 1
 fi
-if [[ "$actual_qos" == "h200_dev" ]]; then
-  echo "refusing qualification on h200_dev" >&2
-  exit 1
-fi
-if [[ "$actual_qos" != "h200_mrs_shared" ]]; then
-  echo "qualification requires QoS h200_mrs_shared" >&2
+if [[ "$actual_qos" != "h200_dev" ]]; then
+  echo "qualification requires QoS h200_dev" >&2
   exit 1
 fi
 if [[ "$actual_partition" != "h200" ]]; then

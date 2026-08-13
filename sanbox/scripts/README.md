@@ -6,7 +6,7 @@ separate.
 1. Commit the clean `sanbox/` source tree.
 2. Submit through pueue with `bash scripts/submit_safa_ab.sh`. The submitter
    creates an immutable snapshot, runs the exact-equivalence/config/inventory
-   suite plus short HSTU/SAFA smokes on one shared-QoS H200, and only then
+   suite plus short HSTU/SAFA smokes on one `h200_dev` H200, and only then
    releases the ML-1M and ML-20M seed arrays.
 3. Export the six completed runs for one dataset to the JSON schema documented
    by `python scripts/qualify_safa_results.py --help`. Take `attention_mode`,
@@ -45,7 +45,8 @@ learning-rate, dropout, or any other operative Gin drift invalidates the set.
 The preflight records the intended identity in its manifest-specific marker;
 full jobs verify it before training and the post-run command pins it again.
 The array job ID is pinned independently from the submitter output. The gate
-also requires QoS `h200_mrs_shared` and the exact task map `0..5` to seeds
+also requires QoS `h200_dev` for ML-1M and `h200_mrs_2_high` for ML-20M, plus
+the exact task map `0..5` to seeds
 `42..44`, with HSTU on even tasks and SAFA on odd tasks. Full array runs require
 online W&B and fail if initialization, metric logging, or finalization fails;
 preflight smokes do not initialize W&B and are not post-run evidence.

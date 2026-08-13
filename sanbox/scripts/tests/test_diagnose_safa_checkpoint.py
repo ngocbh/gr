@@ -2,6 +2,7 @@
 
 import hashlib
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from scripts.diagnose_safa_checkpoint import (
     DiagnosticError,
     GAP_BINS,
     MetricStrata,
+    _build_model_and_dataset,
     _gap_labels,
     data_fingerprint,
     deterministic_dataset_indices,
@@ -28,6 +30,7 @@ class CheckpointBundleTest(unittest.TestCase):
         config_sha = hashlib.sha256(self.config.encode("utf-8")).hexdigest()
         self.checkpoint = {
             "epoch": 100,
+            "dataset_name": "ml-1m",
             "model_state_dict": {},
             "attention_mode": "safa",
             "random_seed": 42,
@@ -43,13 +46,14 @@ class CheckpointBundleTest(unittest.TestCase):
             "slurm_array_job_id": "123456",
             "slurm_array_task_id": 1,
             "slurm_job_id": "123457",
-            "slurm_job_qos": "h200_mrs_shared",
+            "slurm_job_qos": "h200_dev",
             "slurm_job_partition": "h200",
             "slurm_restart_count": 0,
         }
         self.metadata = {
             key: self.checkpoint[key]
             for key in (
+                "dataset_name",
                 "attention_mode",
                 "random_seed",
                 "parameter_count",
@@ -80,6 +84,79 @@ class CheckpointBundleTest(unittest.TestCase):
             self.metadata,
             self.source,
         )
+
+    def test_accepts_ml20_high_qos(self) -> None:
+        checkpoint = {
+            **self.checkpoint,
+            "dataset_name": "ml-20m",
+            "slurm_job_qos": "h200_mrs_2_high",
+        }
+        metadata = {
+            **self.metadata,
+            "dataset_name": "ml-20m",
+            "slurm_job_qos": "h200_mrs_2_high",
+        }
+        validate_checkpoint_bundle(
+            checkpoint,
+            self.config,
+            metadata,
+            self.source,
+        )
+
+    def test_reconstruction_rejects_gin_checkpoint_dataset_mismatch(self) -> None:
+        values = {
+            "hstu_encoder.attention_mode": "safa",
+            "train_fn.dataset_name": "ml-20m",
+            "train_fn.max_sequence_length": 200,
+            "train_fn.positional_sampling_ratio": None,
+            "train_fn.eval_batch_size": 128,
+            "train_fn.eval_user_max_batch_size": None,
+            "train_fn.main_module": "HSTU",
+            "train_fn.main_module_bf16": False,
+            "train_fn.dropout_rate": 0.2,
+            "train_fn.user_embedding_norm": "l2_norm",
+            "train_fn.sampling_strategy": "local",
+            "train_fn.item_l2_norm": True,
+            "train_fn.top_k_method": "MIPSBruteForceTopK",
+            "train_fn.embedding_module_type": "local",
+            "train_fn.item_embedding_dim": 256,
+            "train_fn.interaction_module_type": "DotProduct",
+            "train_fn.gr_output_length": 10,
+            "train_fn.l2_norm_eps": 1e-6,
+            "train_fn.enable_tf32": True,
+            "train_fn.random_seed": 42,
+            "train_fn.num_epochs": 101,
+        }
+
+        class FakeGin:
+            @staticmethod
+            def clear_config() -> None:
+                pass
+
+            @staticmethod
+            def parse_config(config: str) -> None:
+                del config
+
+            @staticmethod
+            def query_parameter(name: str):
+                return values[name]
+
+        bundle = types.SimpleNamespace(
+            checkpoint=self.checkpoint,
+            resolved_config=self.config,
+        )
+        train = types.SimpleNamespace(
+            _config_identities=lambda *_args, **_kwargs: (
+                self.checkpoint["resolved_gin_config_sha256"],
+                self.checkpoint["experiment_config_sha256"],
+            )
+        )
+        with self.assertRaisesRegex(DiagnosticError, "dataset_name mismatch"):
+            _build_model_and_dataset(
+                bundle,
+                {"gin": FakeGin, "train": train},
+                torch.device("cpu"),
+            )
 
     def test_rejects_unknown_attention_mode(self) -> None:
         checkpoint = {**self.checkpoint, "attention_mode": "unknown"}

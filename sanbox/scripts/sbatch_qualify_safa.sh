@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=safa-qualify
 #SBATCH --partition=h200
-#SBATCH --qos=h200_mrs_shared
+#SBATCH --qos=h200_dev
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12

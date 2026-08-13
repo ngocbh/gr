@@ -12,6 +12,7 @@ from unittest import mock
 
 from scripts.qualify_safa_results import (
     EXPECTED_PARAMETER_INVENTORIES,
+    EXPECTED_PARAMETER_COUNTS,
     ResultsError,
     load_results,
     main,
@@ -92,7 +93,7 @@ def _document(deltas=None):
             "slurm_array_job_id": ARRAY_JOB_ID,
             "slurm_array_task_id": task_id,
             "slurm_job_id": str(123456 + task_id),
-            "slurm_job_qos": "h200_mrs_shared",
+            "slurm_job_qos": "h200_dev",
             "slurm_restart_count": 0,
             "slurm_job_partition": "h200",
             "epochs": [{"epoch": epoch, "value": value} for epoch in range(96, 101)],
@@ -125,7 +126,7 @@ def _sacct_output(
                 states.get(task_id, "COMPLETED"),
                 exit_codes.get(task_id, "0:0"),
                 str(restarts.get(task_id, 0)),
-                qos.get(task_id, "h200_mrs_shared"),
+                qos.get(task_id, "h200_dev"),
                 partitions.get(task_id, "h200"),
             )
         )
@@ -133,10 +134,11 @@ def _sacct_output(
     )
 
 
-def _scheduler_receipt(**kwargs):
+def _scheduler_receipt(*, expected_qos="h200_dev", **kwargs):
     return parse_sacct_receipt(
         _sacct_output(**kwargs),
         expected_array_job_id=ARRAY_JOB_ID,
+        expected_qos=expected_qos,
     )
 
 
@@ -161,7 +163,7 @@ class SacctReceiptTest(unittest.TestCase):
         self.assertEqual(set(receipt), set(range(6)))
         self.assertEqual(receipt[3]["slurm_job_id"], "123459")
         self.assertEqual(receipt[3]["slurm_restart_count"], 2)
-        self.assertEqual(receipt[3]["slurm_job_qos"], "h200_mrs_shared")
+        self.assertEqual(receipt[3]["slurm_job_qos"], "h200_dev")
         self.assertEqual(receipt[3]["slurm_job_partition"], "h200")
 
     def test_missing_extra_duplicate_aggregate_or_malformed_rows_are_rejected(
@@ -171,11 +173,10 @@ class SacctReceiptTest(unittest.TestCase):
         cases = {
             "missing": "\n".join(valid_lines[:-1]),
             "extra": _sacct_output()
-            + f"\n999999|{ARRAY_JOB_ID}_6|COMPLETED|0:0|0|h200_mrs_shared|h200",
+            + f"\n999999|{ARRAY_JOB_ID}_6|COMPLETED|0:0|0|h200_dev|h200",
             "duplicate": _sacct_output() + f"\n{valid_lines[0]}",
             "aggregate": (
-                f"{ARRAY_JOB_ID}|{ARRAY_JOB_ID}_[0-5]|COMPLETED|0:0|0|"
-                "h200_mrs_shared|h200"
+                f"{ARRAY_JOB_ID}|{ARRAY_JOB_ID}_[0-5]|COMPLETED|0:0|0|" "h200_dev|h200"
             ),
             "malformed": "too|few|fields",
             "blank": "",
@@ -186,6 +187,7 @@ class SacctReceiptTest(unittest.TestCase):
                     parse_sacct_receipt(
                         output,
                         expected_array_job_id=ARRAY_JOB_ID,
+                        expected_qos="h200_dev",
                     )
 
     def test_nonterminal_or_wrong_scheduler_values_are_rejected(self) -> None:
@@ -194,7 +196,7 @@ class SacctReceiptTest(unittest.TestCase):
             {"states": {0: "FAILED"}},
             {"exit_codes": {0: "1:0"}},
             {"restarts": {0: "-1"}},
-            {"qos": {0: "h200_dev"}},
+            {"qos": {0: "h200_mrs_shared"}},
             {"partitions": {0: "debug"}},
             {"raw_job_ids": {1: 123456}},
         )
@@ -210,7 +212,10 @@ class SacctReceiptTest(unittest.TestCase):
         with mock.patch(
             "scripts.qualify_safa_results.subprocess.run", return_value=completed
         ) as run:
-            receipt = query_sacct_receipt(ARRAY_JOB_ID)
+            receipt = query_sacct_receipt(
+                ARRAY_JOB_ID,
+                expected_qos="h200_dev",
+            )
         self.assertEqual(set(receipt), set(range(6)))
         command = run.call_args.args[0]
         self.assertEqual(command[0], "sacct")
@@ -228,7 +233,10 @@ class SacctReceiptTest(unittest.TestCase):
                 "scripts.qualify_safa_results.subprocess.run", side_effect=failure
             ):
                 with self.assertRaisesRegex(ResultsError, "could not query sacct"):
-                    query_sacct_receipt(ARRAY_JOB_ID)
+                    query_sacct_receipt(
+                        ARRAY_JOB_ID,
+                        expected_qos="h200_dev",
+                    )
 
         failed = subprocess.CompletedProcess(
             args=[], returncode=1, stdout="", stderr="accounting unavailable"
@@ -237,10 +245,36 @@ class SacctReceiptTest(unittest.TestCase):
             "scripts.qualify_safa_results.subprocess.run", return_value=failed
         ):
             with self.assertRaisesRegex(ResultsError, "sacct query failed"):
-                query_sacct_receipt(ARRAY_JOB_ID)
+                query_sacct_receipt(
+                    ARRAY_JOB_ID,
+                    expected_qos="h200_dev",
+                )
 
 
 class ThresholdTest(unittest.TestCase):
+    def test_ml20_high_qos_passes_provenance_gate(self) -> None:
+        document = _document()
+        for run in document["runs"]:
+            run["dataset"] = "ml-20m"
+            run["parameter_count"] = EXPECTED_PARAMETER_COUNTS["ml-20m"]
+            run["parameter_inventory_sha256"] = EXPECTED_PARAMETER_INVENTORIES["ml-20m"]
+            run["slurm_job_qos"] = "h200_mrs_2_high"
+        receipt = _scheduler_receipt(
+            expected_qos="h200_mrs_2_high",
+            qos={task_id: "h200_mrs_2_high" for task_id in range(6)},
+        )
+        summary = qualify_results(
+            document,
+            expected_dataset="ml-20m",
+            expected_source_commit=COMMIT,
+            expected_source_tree=TREE,
+            expected_source_manifest=MANIFEST,
+            expected_experiment_config_sha256=EXPECTED_EXPERIMENT_CONFIG_SHA256,
+            expected_array_job_id=ARRAY_JOB_ID,
+            scheduler_receipt=receipt,
+        )
+        self.assertTrue(summary["passed"])
+
     def test_exact_mean_and_two_positive_seed_boundary_passes(self) -> None:
         summary = _qualify(_document({42: 0.003, 43: 0.003, 44: 0.0}))
         self.assertTrue(summary["passed"])
@@ -391,7 +425,7 @@ class InvalidInputTest(unittest.TestCase):
 
     def test_externally_expected_metadata_is_enforced(self) -> None:
         document = _document()
-        with self.assertRaisesRegex(ResultsError, "dataset mismatch"):
+        with self.assertRaisesRegex(ResultsError, "wrong QoS"):
             qualify_results(
                 document,
                 expected_dataset="ml-20m",
@@ -464,7 +498,7 @@ class InvalidInputTest(unittest.TestCase):
             ("array ID", "slurm_array_job_id", "0"),
             ("job ID", "slurm_job_id", "job-123"),
             ("task ID", "slurm_array_task_id", 6),
-            ("QoS", "slurm_job_qos", "h200_dev"),
+            ("QoS", "slurm_job_qos", "h200_mrs_shared"),
             ("restart", "slurm_restart_count", -1),
             ("partition", "slurm_job_partition", "debug"),
         )
@@ -570,7 +604,10 @@ class CliTest(unittest.TestCase):
                         ARRAY_JOB_ID,
                     ]
                 )
-            query.assert_called_once_with(ARRAY_JOB_ID)
+            query.assert_called_once_with(
+                ARRAY_JOB_ID,
+                expected_qos="h200_dev",
+            )
             return exit_code, json.loads(output.getvalue())
 
     def test_cli_exit_codes_and_machine_readable_summaries(self) -> None:

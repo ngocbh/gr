@@ -117,7 +117,7 @@ class SlurmProvenanceTest(unittest.TestCase):
                     "SLURM_ARRAY_JOB_ID": "123456",
                     "SLURM_ARRAY_TASK_ID": str(task_id),
                     "SLURM_JOB_ID": str(123456 + task_id),
-                    "SLURM_JOB_QOS": "h200_mrs_shared",
+                    "SLURM_JOB_QOS": "h200_dev",
                     "SLURM_RESTART_COUNT": "0",
                     "SLURM_JOB_PARTITION": "h200",
                 }
@@ -125,6 +125,7 @@ class SlurmProvenanceTest(unittest.TestCase):
                     provenance = _slurm_provenance(
                         attention_mode=arm,
                         random_seed=seed,
+                        dataset_name="ml-1m",
                     )
                 self.assertEqual(
                     provenance,
@@ -132,7 +133,7 @@ class SlurmProvenanceTest(unittest.TestCase):
                         "slurm_array_job_id": "123456",
                         "slurm_array_task_id": task_id,
                         "slurm_job_id": str(123456 + task_id),
-                        "slurm_job_qos": "h200_mrs_shared",
+                        "slurm_job_qos": "h200_dev",
                         "slurm_restart_count": 0,
                         "slurm_job_partition": "h200",
                     },
@@ -146,7 +147,7 @@ class SlurmProvenanceTest(unittest.TestCase):
             "SLURM_ARRAY_JOB_ID": "123456",
             "SLURM_ARRAY_TASK_ID": "0",
             "SLURM_JOB_ID": "123456",
-            "SLURM_JOB_QOS": "h200_mrs_shared",
+            "SLURM_JOB_QOS": "h200_dev",
             "SLURM_RESTART_COUNT": "0",
             "SLURM_JOB_PARTITION": "h200",
         }
@@ -155,7 +156,7 @@ class SlurmProvenanceTest(unittest.TestCase):
             ("array ID", "SLURM_ARRAY_JOB_ID", "0"),
             ("task ID", "SLURM_ARRAY_TASK_ID", "6"),
             ("job ID", "SLURM_JOB_ID", "123_0"),
-            ("QoS", "SLURM_JOB_QOS", "h200_dev"),
+            ("QoS", "SLURM_JOB_QOS", "h200_mrs_shared"),
             ("restart", "SLURM_RESTART_COUNT", "-1"),
             ("partition", "SLURM_JOB_PARTITION", "debug"),
         )
@@ -168,11 +169,46 @@ class SlurmProvenanceTest(unittest.TestCase):
                     environment[key] = value
                 with mock.patch.dict(os.environ, environment, clear=True):
                     with self.assertRaises(ValueError):
-                        _slurm_provenance(attention_mode="hstu", random_seed=42)
+                        _slurm_provenance(
+                            attention_mode="hstu",
+                            random_seed=42,
+                            dataset_name="ml-1m",
+                        )
 
         with mock.patch.dict(os.environ, valid, clear=True):
             with self.assertRaisesRegex(ValueError, "does not match"):
-                _slurm_provenance(attention_mode="safa", random_seed=42)
+                _slurm_provenance(
+                    attention_mode="safa",
+                    random_seed=42,
+                    dataset_name="ml-1m",
+                )
+
+    def test_ml20_requires_high_qos(self) -> None:
+        environment = {
+            "GR_REQUIRE_SLURM_PROVENANCE": "1",
+            "SLURM_ARRAY_JOB_ID": "123456",
+            "SLURM_ARRAY_TASK_ID": "0",
+            "SLURM_JOB_ID": "123456",
+            "SLURM_JOB_QOS": "h200_mrs_2_high",
+            "SLURM_RESTART_COUNT": "0",
+            "SLURM_JOB_PARTITION": "h200",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            provenance = _slurm_provenance(
+                attention_mode="hstu",
+                random_seed=42,
+                dataset_name="ml-20m",
+            )
+        self.assertEqual(provenance["slurm_job_qos"], "h200_mrs_2_high")
+
+        environment["SLURM_JOB_QOS"] = "h200_dev"
+        with mock.patch.dict(os.environ, environment, clear=True):
+            with self.assertRaisesRegex(ValueError, "h200_mrs_2_high"):
+                _slurm_provenance(
+                    attention_mode="hstu",
+                    random_seed=42,
+                    dataset_name="ml-20m",
+                )
 
     def test_scheduler_provenance_is_optional_outside_full_arrays(self) -> None:
         with mock.patch.dict(
@@ -181,7 +217,12 @@ class SlurmProvenanceTest(unittest.TestCase):
             clear=True,
         ):
             self.assertEqual(
-                _slurm_provenance(attention_mode="hstu", random_seed=42), {}
+                _slurm_provenance(
+                    attention_mode="hstu",
+                    random_seed=42,
+                    dataset_name="ml-1m",
+                ),
+                {},
             )
 
 
@@ -293,16 +334,17 @@ class GinConfigIdentityTest(unittest.TestCase):
 
 
 class SlurmContractTest(unittest.TestCase):
-    def test_full_array_is_one_shared_h200_per_paired_task(self) -> None:
+    def test_full_array_is_one_h200_dev_gpu_per_paired_task(self) -> None:
         wrapper = (REPO_ROOT / "scripts/sbatch_safa_ab.sh").read_text(encoding="utf-8")
         self.assertIn("#SBATCH --partition=h200", wrapper)
-        self.assertIn("#SBATCH --qos=h200_mrs_shared", wrapper)
+        self.assertIn("#SBATCH --qos=h200_dev", wrapper)
         self.assertIn("#SBATCH --gres=gpu:h200:1", wrapper)
         self.assertIn("#SBATCH --array=0-5", wrapper)
         self.assertIn("seeds=(42 43 44)", wrapper)
         self.assertIn("SLURM_ARRAY_TASK_ID / 2", wrapper)
         self.assertIn("SLURM_ARRAY_TASK_ID % 2", wrapper)
-        self.assertIn('== "h200_dev"', wrapper)
+        self.assertIn('ml-1m) required_qos="h200_dev"', wrapper)
+        self.assertIn('ml-20m) required_qos="h200_mrs_2_high"', wrapper)
         self.assertIn("GR_EXPECTED_EXPERIMENT_CONFIG_SHA256", wrapper)
         self.assertIn("GR_REQUIRE_SLURM_PROVENANCE=1", wrapper)
         self.assertIn("GR_REQUIRE_WANDB=1", wrapper)
@@ -331,6 +373,7 @@ class SlurmContractTest(unittest.TestCase):
         self.assertEqual(submitter.count('dependency="afterok:$qualification_job"'), 2)
         self.assertIn("GR_DATASET=ml-1m", submitter)
         self.assertIn("GR_DATASET=ml-20m", submitter)
+        self.assertIn("--partition=h200 --qos=h200_mrs_2_high", submitter)
         self.assertIn("--job-name=safa-ab-ml1m", submitter)
         self.assertIn("--job-name=safa-ab-ml20m", submitter)
         self.assertIn("postrun_ml1m=", submitter)
@@ -404,7 +447,7 @@ class SlurmContractTest(unittest.TestCase):
                         f"source_tree={provenance['source_tree']}",
                         f"source_manifest={provenance['source_manifest']}",
                         "qualification_job_id=998",
-                        "qualification_job_qos=h200_mrs_shared",
+                        "qualification_job_qos=h200_dev",
                         "qualification_job_partition=h200",
                         "qualification_restart_count=0",
                         f"experiment_config_ml-1m={'d' * 64}",
@@ -453,7 +496,7 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                 'task_id="${3#*_}"\n'
                 'job_id="$((1000 + task_id))"\n'
                 "printf 'JobId=%s ArrayJobId=999 ArrayTaskId=%s "
-                "Partition=h200 Restarts=0 QOS=h200_mrs_shared\\n' "
+                "Partition=h200 Restarts=0 QOS=h200_dev\\n' "
                 '"$job_id" "$task_id"\n',
                 encoding="utf-8",
             )
@@ -475,7 +518,7 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                         "GR_CKPTS_ROOT": str(temporary_root / "ckpts"),
                         "GR_QUALIFICATION_ROOT": str(qualification_root),
                         "GR_WANDB_ENABLED": "0",
-                        "SLURM_JOB_QOS": "h200_mrs_shared",
+                        "SLURM_JOB_QOS": "h200_dev",
                         "SLURM_JOB_PARTITION": "h200",
                         "SLURM_JOB_ID": str(1000 + task_id),
                         "SLURM_ARRAY_JOB_ID": "999",
@@ -523,7 +566,7 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                     self.assertEqual(captured["slurm_array_job_id"], "999")
                     self.assertEqual(captured["slurm_array_task_id"], str(task_id))
                     self.assertEqual(captured["slurm_job_id"], str(1000 + task_id))
-                    self.assertEqual(captured["slurm_job_qos"], "h200_mrs_shared")
+                    self.assertEqual(captured["slurm_job_qos"], "h200_dev")
                     self.assertEqual(captured["slurm_restart_count"], "0")
                     self.assertEqual(captured["slurm_job_partition"], "h200")
                     self.assertIsNone(captured["wandb_mode"])
@@ -535,7 +578,7 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
             fake_scontrol.write_text(
                 "#!/usr/bin/env bash\nprintf '%s\\n' "
                 "'JobId=1005 ArrayJobId=999 ArrayTaskId=5 Partition=h200 "
-                "Restarts=2 QOS=h200_mrs_shared'\n",
+                "Restarts=2 QOS=h200_dev'\n",
                 encoding="utf-8",
             )
             restarted_environment = {
@@ -577,12 +620,12 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
             fake_scontrol.write_text(
                 "#!/usr/bin/env bash\nprintf '%s\\n' "
                 "'JobId=1005 ArrayJobId=999 ArrayTaskId=5 Partition=h200 "
-                "Restarts=0 QOS=h200_dev'\n",
+                "Restarts=0 QOS=h200_mrs_shared'\n",
                 encoding="utf-8",
             )
             rejected_environment = {
                 **environment,
-                "SLURM_JOB_QOS": "h200_dev",
+                "SLURM_JOB_QOS": "h200_mrs_shared",
                 "SLURM_RESTART_COUNT": "0",
             }
             rejected = subprocess.run(
@@ -593,7 +636,35 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                 text=True,
             )
             self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("refusing experiment on h200_dev", rejected.stderr)
+            self.assertIn("experiment requires QoS h200_dev", rejected.stderr)
+
+            high_capture = temporary_root / "capture-high.json"
+            fake_scontrol.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' "
+                "'JobId=1005 ArrayJobId=999 ArrayTaskId=5 Partition=h200 "
+                "Restarts=0 QOS=h200_mrs_2_high'\n",
+                encoding="utf-8",
+            )
+            high_environment = {
+                **environment,
+                "CAPTURE_PATH": str(high_capture),
+                "GR_DATASET": "ml-20m",
+                "SLURM_JOB_QOS": "h200_mrs_2_high",
+            }
+            subprocess.run(
+                ["/bin/bash", str(spooled_wrapper)],
+                check=True,
+                env=high_environment,
+                capture_output=True,
+                text=True,
+            )
+            high = json.loads(high_capture.read_text(encoding="utf-8"))
+            self.assertEqual(high["slurm_job_qos"], "h200_mrs_2_high")
+            self.assertTrue(
+                high["argv"][2].endswith(
+                    "configs/ml-20m/safa-sampled-softmax-n128-large-final.gin"
+                )
+            )
 
 
 class TrainLauncherTest(unittest.TestCase):

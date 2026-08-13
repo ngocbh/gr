@@ -19,7 +19,7 @@ Each run has the following shape::
       "slurm_array_job_id": "123456",
       "slurm_array_task_id": 0,
       "slurm_job_id": "123456",
-      "slurm_job_qos": "h200_mrs_shared",
+      "slurm_job_qos": "h200_dev",
       "slurm_restart_count": 0,
       "slurm_job_partition": "h200",
       "resolved_gin_config": "<operative Gin config>",
@@ -66,7 +66,10 @@ MIN_DELTA_THRESHOLD = -0.001
 HEX_GIT_ID = re.compile(r"[0-9a-f]{40}")
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
 POSITIVE_DECIMAL_ID = re.compile(r"[1-9][0-9]*")
-REQUIRED_QOS = "h200_mrs_shared"
+REQUIRED_QOS_BY_DATASET = {
+    "ml-1m": "h200_dev",
+    "ml-20m": "h200_mrs_2_high",
+}
 REQUIRED_PARTITION = "h200"
 SACCT_FIELDS = "JobIDRaw,JobID,State,ExitCode,Restarts,QOS,Partition"
 SCHEDULER_RECEIPT_KEYS = {
@@ -207,6 +210,7 @@ def validate_scheduler_receipt(
     receipt: Mapping[int, Mapping[str, Any]],
     *,
     expected_array_job_id: str,
+    expected_qos: str,
 ) -> None:
     if (
         not isinstance(expected_array_job_id, str)
@@ -246,7 +250,7 @@ def validate_scheduler_receipt(
             raise ResultsError(f"scheduler task {task_id} did not complete")
         if record["exit_code"] != "0:0":
             raise ResultsError(f"scheduler task {task_id} has a nonzero exit code")
-        if record["slurm_job_qos"] != REQUIRED_QOS:
+        if record["slurm_job_qos"] != expected_qos:
             raise ResultsError(f"scheduler task {task_id} used the wrong QoS")
         if record["slurm_job_partition"] != REQUIRED_PARTITION:
             raise ResultsError(f"scheduler task {task_id} used the wrong partition")
@@ -256,6 +260,7 @@ def parse_sacct_receipt(
     output: str,
     *,
     expected_array_job_id: str,
+    expected_qos: str,
 ) -> Dict[int, Dict[str, Any]]:
     """Parse allocation-only, pipe-delimited sacct output for one array."""
     if (
@@ -307,11 +312,14 @@ def parse_sacct_receipt(
     validate_scheduler_receipt(
         records,
         expected_array_job_id=expected_array_job_id,
+        expected_qos=expected_qos,
     )
     return records
 
 
-def query_sacct_receipt(expected_array_job_id: str) -> Dict[int, Dict[str, Any]]:
+def query_sacct_receipt(
+    expected_array_job_id: str, *, expected_qos: str
+) -> Dict[int, Dict[str, Any]]:
     if (
         not isinstance(expected_array_job_id, str)
         or POSITIVE_DECIMAL_ID.fullmatch(expected_array_job_id) is None
@@ -342,6 +350,7 @@ def query_sacct_receipt(expected_array_job_id: str) -> Dict[int, Dict[str, Any]]
     return parse_sacct_receipt(
         completed.stdout,
         expected_array_job_id=expected_array_job_id,
+        expected_qos=expected_qos,
     )
 
 
@@ -399,7 +408,9 @@ def _validate_run_metadata(run: Mapping[str, Any]) -> None:
         raise ResultsError(f"run keys mismatch: missing={missing}, extra={extra}")
     if _require_string(run, "metric") != "ndcg@10":
         raise ResultsError("metric must be ndcg@10")
-    _require_string(run, "dataset")
+    dataset = _require_string(run, "dataset")
+    if dataset not in REQUIRED_QOS_BY_DATASET:
+        raise ResultsError(f"unsupported dataset: {dataset}")
     if HEX_GIT_ID.fullmatch(_require_string(run, "source_commit")) is None:
         raise ResultsError("source_commit must be a 40-character lowercase Git ID")
     if HEX_GIT_ID.fullmatch(_require_string(run, "source_tree")) is None:
@@ -452,8 +463,9 @@ def _validate_run_metadata(run: Mapping[str, Any]) -> None:
         raise ResultsError(
             "slurm_array_task_id does not match the recorded seed/arm mapping"
         )
-    if _require_string(run, "slurm_job_qos") != REQUIRED_QOS:
-        raise ResultsError(f"slurm_job_qos must be {REQUIRED_QOS}")
+    required_qos = REQUIRED_QOS_BY_DATASET[dataset]
+    if _require_string(run, "slurm_job_qos") != required_qos:
+        raise ResultsError(f"slurm_job_qos must be {required_qos} for {dataset}")
     _require_nonnegative_int(run["slurm_restart_count"], "slurm_restart_count")
     if _require_string(run, "slurm_job_partition") != REQUIRED_PARTITION:
         raise ResultsError(f"slurm_job_partition must be {REQUIRED_PARTITION}")
@@ -519,11 +531,14 @@ def qualify_results(
     ):
         raise ResultsError("invalid results document")
     runs: List[Mapping[str, Any]] = document["runs"]
+    if expected_dataset not in EXPECTED_PARAMETER_COUNTS:
+        raise ResultsError(f"unsupported dataset: {expected_dataset}")
     if len(runs) != len(SEEDS) * len(ARMS):
         raise ResultsError("runs must contain exactly six paired seed/arm entries")
     validate_scheduler_receipt(
         scheduler_receipt,
         expected_array_job_id=expected_array_job_id,
+        expected_qos=REQUIRED_QOS_BY_DATASET[expected_dataset],
     )
 
     baseline_metadata: Optional[Dict[str, Any]] = None
@@ -613,8 +628,6 @@ def qualify_results(
         raise ResultsError(
             "experiment config does not match the externally pinned identity"
         )
-    if expected_dataset not in EXPECTED_PARAMETER_COUNTS:
-        raise ResultsError(f"unsupported dataset: {expected_dataset}")
     if (
         baseline_metadata["parameter_count"]
         != EXPECTED_PARAMETER_COUNTS[expected_dataset]
@@ -706,7 +719,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     try:
         input_sha256 = _sha256(args.results)
         document = load_results(args.results)
-        scheduler_receipt = query_sacct_receipt(args.expected_array_job_id)
+        scheduler_receipt = query_sacct_receipt(
+            args.expected_array_job_id,
+            expected_qos=REQUIRED_QOS_BY_DATASET[args.expected_dataset],
+        )
         summary = qualify_results(
             document,
             expected_dataset=args.expected_dataset,

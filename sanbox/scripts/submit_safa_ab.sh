@@ -37,19 +37,19 @@ qualification_marker="$GR_QUALIFICATION_ROOT/$manifest.passed"
 
 common_export="ALL,GR_CODE_SNAPSHOT=$snapshot,GR_EXPECTED_SOURCE_MANIFEST=$manifest,GR_DATA_ROOT=$GR_DATA_ROOT,GR_EXPS_ROOT=$GR_EXPS_ROOT,GR_CKPTS_ROOT=$GR_CKPTS_ROOT,GR_QUALIFICATION_ROOT=$GR_QUALIFICATION_ROOT,GR_REQUIRE_WANDB=0,GR_REQUIRE_SLURM_PROVENANCE=0"
 qualification_job="$(sbatch --parsable \
-  --partition=h200 --qos=h200_mrs_shared \
+  --partition=h200 --qos=h200_dev \
   --export="$common_export" \
   "$snapshot/scripts/sbatch_qualify_safa.sh")"
 qualification_job="${qualification_job%%;*}"
 
 ml1m_job="$(sbatch --parsable \
-  --partition=h200 --qos=h200_mrs_shared \
+  --partition=h200 --qos=h200_dev \
   --job-name=safa-ab-ml1m \
   --dependency="afterok:$qualification_job" \
   --export="$common_export,GR_DATASET=ml-1m" \
   "$snapshot/scripts/sbatch_safa_ab.sh")"
 ml20m_job="$(sbatch --parsable \
-  --partition=h200 --qos=h200_mrs_shared \
+  --partition=h200 --qos=h200_mrs_2_high \
   --job-name=safa-ab-ml20m \
   --dependency="afterok:$qualification_job" \
   --export="$common_export,GR_DATASET=ml-20m" \

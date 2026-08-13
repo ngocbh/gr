@@ -40,6 +40,7 @@ SLURM_KEYS = (
     "slurm_restart_count",
 )
 IDENTITY_KEYS = (
+    "dataset_name",
     "attention_mode",
     "random_seed",
     "parameter_count",
@@ -143,6 +144,10 @@ def validate_checkpoint_bundle(
         raise DiagnosticError("checkpoint attention_mode must be 'hstu' or 'safa'")
     if run_metadata["attention_mode"] not in ("hstu", "safa"):
         raise DiagnosticError("run metadata attention_mode must be 'hstu' or 'safa'")
+    if checkpoint["dataset_name"] not in ("ml-1m", "ml-20m"):
+        raise DiagnosticError("checkpoint dataset_name must be 'ml-1m' or 'ml-20m'")
+    if run_metadata["dataset_name"] not in ("ml-1m", "ml-20m"):
+        raise DiagnosticError("run metadata dataset_name must be 'ml-1m' or 'ml-20m'")
     _require_int(checkpoint["epoch"], "checkpoint.epoch")
     _require_int(checkpoint["random_seed"], "checkpoint.random_seed")
     _require_int(checkpoint["parameter_count"], "checkpoint.parameter_count", minimum=1)
@@ -205,8 +210,15 @@ def validate_checkpoint_bundle(
             or not 0 <= task_id < 6
         ):
             raise DiagnosticError("checkpoint.slurm_array_task_id must be in [0, 5]")
-        if checkpoint["slurm_job_qos"] != "h200_mrs_shared":
-            raise DiagnosticError("checkpoint SLURM QoS must be h200_mrs_shared")
+        required_qos = {
+            "ml-1m": "h200_dev",
+            "ml-20m": "h200_mrs_2_high",
+        }[checkpoint["dataset_name"]]
+        if checkpoint["slurm_job_qos"] != required_qos:
+            raise DiagnosticError(
+                f"checkpoint SLURM QoS for {checkpoint['dataset_name']} "
+                f"must be {required_qos}"
+            )
         if checkpoint["slurm_job_partition"] != "h200":
             raise DiagnosticError("checkpoint SLURM partition must be h200")
         restart_count = checkpoint["slurm_restart_count"]
@@ -1076,6 +1088,8 @@ def _build_model_and_dataset(
         "num_epochs",
     ):
         _expect_type(config[name], int, f"train_fn.{name}")
+    if config["dataset_name"] != bundle.checkpoint["dataset_name"]:
+        raise DiagnosticError("Gin/checkpoint dataset_name mismatch")
     if config["main_module"] != "HSTU" or mode not in ("hstu", "safa"):
         raise DiagnosticError("diagnostics require matched HSTU or SAFA")
     validate_final_epoch(bundle.checkpoint["epoch"], config["num_epochs"])

@@ -125,8 +125,10 @@ This is a SLURM cluster checkout (H200 GPUs, conda env `gr`). Some files here ar
   `GR_WANDB_ENABLED`, `WANDB_*`). Prefer this over invoking `main.py` directly for consistency.
 - **`scripts/wrapper.sh`** — `sbatch scripts/wrapper.sh <command...>` to submit to SLURM
   (defaults: partition `h200`, `--gres=gpu:h200:4`, override on the CLI).
-- GPU experiments in this checkout use the shared H200 QoS
-  **`h200_mrs_shared`**. Do not submit them to `h200_dev`.
+- GPU experiments in this checkout use **`h200_mrs_shared`** by default. The
+  clean `sanbox/` HSTU/SAFA workflow is an explicit exception: preflight and
+  ML-1M use **`h200_dev`**, while the long ML-20M array uses
+  **`h200_mrs_2_high`**.
 - **`scripts/submit_attention_experiments.sh [core|ab|fohstu|fohstu-repl|fosoftmax|softmax-canonical|moments|hybrid|lift-ml20|tanh|signed-additive|signed-lift]`** creates a read-only,
   checksummed source snapshot and submits the controlled attention arrays from it.
   `core` submits only the corrected softmax A/B and FoHSTU baseline arrays;
