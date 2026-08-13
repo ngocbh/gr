@@ -117,6 +117,65 @@ def _source_provenance() -> Dict[str, str]:
     return provenance
 
 
+def _slurm_provenance(*, attention_mode: str, random_seed: int) -> Dict[str, Any]:
+    """Validate scheduler identity for a full SAFA A/B array run."""
+    required = os.environ.get("GR_REQUIRE_SLURM_PROVENANCE", "0")
+    if required not in ("0", "1"):
+        raise ValueError("GR_REQUIRE_SLURM_PROVENANCE must be 0 or 1")
+    if required == "0":
+        return {}
+
+    values = {
+        "slurm_array_job_id": os.environ.get("SLURM_ARRAY_JOB_ID"),
+        "slurm_array_task_id": os.environ.get("SLURM_ARRAY_TASK_ID"),
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+        "slurm_job_qos": os.environ.get("SLURM_JOB_QOS"),
+        "slurm_restart_count": os.environ.get("SLURM_RESTART_COUNT"),
+        "slurm_job_partition": os.environ.get("SLURM_JOB_PARTITION"),
+    }
+    missing = sorted(key for key, value in values.items() if not value)
+    if missing:
+        raise ValueError(f"missing required SLURM provenance: {missing}")
+
+    for key in ("slurm_array_job_id", "slurm_job_id"):
+        if re.fullmatch(r"[1-9][0-9]*", str(values[key])) is None:
+            raise ValueError(f"{key} must be a positive decimal job ID")
+    task_id_string = str(values["slurm_array_task_id"])
+    if re.fullmatch(r"[0-5]", task_id_string) is None:
+        raise ValueError("slurm_array_task_id must be an integer in [0, 5]")
+    if values["slurm_job_qos"] != "h200_mrs_shared":
+        raise ValueError("full SAFA A/B runs require QoS h200_mrs_shared")
+    restart_count_string = str(values["slurm_restart_count"])
+    if re.fullmatch(r"0|[1-9][0-9]*", restart_count_string) is None:
+        raise ValueError("slurm_restart_count must be a nonnegative integer")
+    if values["slurm_job_partition"] != "h200":
+        raise ValueError("full SAFA A/B runs require partition h200")
+
+    expected_runs = (
+        (42, "hstu"),
+        (42, "safa"),
+        (43, "hstu"),
+        (43, "safa"),
+        (44, "hstu"),
+        (44, "safa"),
+    )
+    task_id = int(task_id_string)
+    expected_seed, expected_mode = expected_runs[task_id]
+    if (random_seed, attention_mode) != (expected_seed, expected_mode):
+        raise ValueError(
+            "SLURM array task does not match the configured seed/attention mode"
+        )
+
+    return {
+        "slurm_array_job_id": str(values["slurm_array_job_id"]),
+        "slurm_array_task_id": task_id,
+        "slurm_job_id": str(values["slurm_job_id"]),
+        "slurm_job_qos": str(values["slurm_job_qos"]),
+        "slurm_restart_count": int(restart_count_string),
+        "slurm_job_partition": str(values["slurm_job_partition"]),
+    }
+
+
 def _parameter_counts(model: torch.nn.Module) -> Tuple[int, int, str]:
     total = sum(parameter.numel() for parameter in model.parameters())
     trainable = sum(
@@ -201,11 +260,63 @@ def _synchronize(device: int) -> None:
         torch.cuda.synchronize(device)
 
 
-def _wandb_log(run: Any, payload: Dict[str, Any], step: int) -> None:
+def _wandb_requirement(*, wandb_enabled: bool, wandb_mode: Optional[str]) -> bool:
+    value = os.environ.get("GR_REQUIRE_WANDB", "0")
+    if value not in ("0", "1"):
+        raise ValueError("GR_REQUIRE_WANDB must be 0 or 1")
+    required = value == "1"
+    if required and not wandb_enabled:
+        raise ValueError("GR_REQUIRE_WANDB=1 requires wandb_enabled=True")
+    effective_mode = wandb_mode or os.environ.get("WANDB_MODE", "online")
+    if required and effective_mode != "online":
+        raise ValueError("required W&B runs must use WANDB_MODE=online")
+    return required
+
+
+def _wandb_log(
+    run: Any,
+    payload: Dict[str, Any],
+    step: int,
+    *,
+    required: bool = False,
+) -> None:
     try:
         run.log(payload, step=step)
     except Exception as error:
+        if required:
+            raise RuntimeError(f"required W&B logging failed at step {step}") from error
         logging.warning("Weights & Biases logging failed at step %d: %s", step, error)
+
+
+def _wandb_initialize(*, required: bool, init_kwargs: Dict[str, Any]) -> Any:
+    if wandb is None:
+        message = "wandb_enabled=True but wandb is not installed"
+        if required:
+            raise RuntimeError(message)
+        logging.warning("%s; continuing without it", message)
+        return None
+    try:
+        run = wandb.init(**init_kwargs)
+    except Exception as error:
+        if required:
+            raise RuntimeError("required W&B initialization failed") from error
+        logging.warning(
+            "Weights & Biases initialization failed; continuing without it: %s",
+            error,
+        )
+        return None
+    if required and run is None:
+        raise RuntimeError("required W&B initialization returned no run")
+    return run
+
+
+def _wandb_finish(run: Any, *, required: bool) -> None:
+    try:
+        run.finish()
+    except Exception as error:
+        if required:
+            raise RuntimeError("required W&B finalization failed") from error
+        logging.warning("Weights & Biases finalization failed: %s", error)
 
 
 @gin.configurable
@@ -271,6 +382,10 @@ def train_fn(
     wandb_tags: Optional[List[str]] = None,
     wandb_mode: Optional[str] = None,
 ) -> None:
+    wandb_required = _wandb_requirement(
+        wandb_enabled=wandb_enabled,
+        wandb_mode=wandb_mode,
+    )
     # Seed before dataset, sampler, and model construction so paired runs share
     # initialization and data order. Kernel determinism remains backend-specific.
     _seed_everything(random_seed)
@@ -360,6 +475,10 @@ def train_fn(
     )
     attention_mode = _attention_mode(main_module)
     source_provenance = _source_provenance()
+    slurm_provenance = _slurm_provenance(
+        attention_mode=attention_mode,
+        random_seed=random_seed,
+    )
     resolved_gin_config = gin.operative_config_str()
     resolved_gin_config_sha256, experiment_config_sha256 = _config_identities(
         resolved_gin_config,
@@ -526,6 +645,7 @@ def train_fn(
                     "trainable_parameter_count": trainable_parameter_count,
                     "parameter_inventory_sha256": parameter_inventory_sha256,
                     **source_provenance,
+                    **slurm_provenance,
                 },
                 indent=2,
                 sort_keys=True,
@@ -537,49 +657,42 @@ def train_fn(
         logging.info(f"Rank {rank}: writing logs to {log_dir}")
         _wandb_run = None
         if wandb_enabled:
-            if wandb is None:
-                logging.warning(
-                    "wandb_enabled=True but wandb is not installed; continuing without it"
-                )
-            else:
-                wandb_config = {
-                    "dataset_name": dataset_name,
-                    "attention_mode": attention_mode,
-                    "random_seed": random_seed,
-                    "world_size": world_size,
-                    "max_sequence_length": max_sequence_length,
-                    "local_batch_size": local_batch_size,
-                    "eval_batch_size": eval_batch_size,
-                    "num_epochs": num_epochs,
-                    "learning_rate": learning_rate,
-                    "weight_decay": weight_decay,
-                    "parameter_count": parameter_count,
-                    "trainable_parameter_count": trainable_parameter_count,
-                    "parameter_inventory_sha256": parameter_inventory_sha256,
-                    "resolved_gin_config": resolved_gin_config,
-                    "resolved_gin_config_sha256": resolved_gin_config_sha256,
-                    "experiment_config_sha256": experiment_config_sha256,
-                    "data_root": os.environ.get("GR_DATA_ROOT", "./tmp"),
-                    "exps_root": str(exps_root),
-                    "ckpts_root": str(ckpts_root),
-                    **source_provenance,
-                }
-                try:
-                    _wandb_run = wandb.init(
-                        project=wandb_project or os.environ.get("WANDB_PROJECT", "gr"),
-                        entity=wandb_entity or os.environ.get("WANDB_ENTITY"),
-                        name=wandb_run_name or experiment_name or model_desc,
-                        group=wandb_group,
-                        tags=wandb_tags,
-                        mode=wandb_mode or os.environ.get("WANDB_MODE", "online"),
-                        dir=str(log_dir),
-                        config=wandb_config,
-                    )
-                except Exception as error:
-                    logging.warning(
-                        "Weights & Biases initialization failed; continuing without it: %s",
-                        error,
-                    )
+            wandb_config = {
+                "dataset_name": dataset_name,
+                "attention_mode": attention_mode,
+                "random_seed": random_seed,
+                "world_size": world_size,
+                "max_sequence_length": max_sequence_length,
+                "local_batch_size": local_batch_size,
+                "eval_batch_size": eval_batch_size,
+                "num_epochs": num_epochs,
+                "learning_rate": learning_rate,
+                "weight_decay": weight_decay,
+                "parameter_count": parameter_count,
+                "trainable_parameter_count": trainable_parameter_count,
+                "parameter_inventory_sha256": parameter_inventory_sha256,
+                "resolved_gin_config": resolved_gin_config,
+                "resolved_gin_config_sha256": resolved_gin_config_sha256,
+                "experiment_config_sha256": experiment_config_sha256,
+                "data_root": os.environ.get("GR_DATA_ROOT", "./tmp"),
+                "exps_root": str(exps_root),
+                "ckpts_root": str(ckpts_root),
+                **source_provenance,
+                **slurm_provenance,
+            }
+            _wandb_run = _wandb_initialize(
+                required=wandb_required,
+                init_kwargs={
+                    "project": wandb_project or os.environ.get("WANDB_PROJECT", "gr"),
+                    "entity": wandb_entity or os.environ.get("WANDB_ENTITY"),
+                    "name": wandb_run_name or experiment_name or model_desc,
+                    "group": wandb_group,
+                    "tags": wandb_tags,
+                    "mode": wandb_mode or os.environ.get("WANDB_MODE", "online"),
+                    "dir": str(log_dir),
+                    "config": wandb_config,
+                },
+            )
     else:
         writer = None
         _wandb_run = None
@@ -678,6 +791,7 @@ def train_fn(
                             "epoch": epoch,
                         },
                         batch_id,
+                        required=wandb_required,
                     )
                 model.train()
                 _synchronize(device)
@@ -765,6 +879,7 @@ def train_fn(
                                 "epoch": epoch,
                             },
                             batch_id,
+                            required=wandb_required,
                         )
 
             opt.step()
@@ -902,6 +1017,7 @@ def train_fn(
                     "resolved_gin_config_sha256": resolved_gin_config_sha256,
                     "experiment_config_sha256": experiment_config_sha256,
                     **source_provenance,
+                    **slurm_provenance,
                 },
                 f"{ckpt_prefix}_ep{epoch}",
             )
@@ -927,6 +1043,7 @@ def train_fn(
                     "epoch": epoch,
                 },
                 batch_id,
+                required=wandb_required,
             )
         last_training_time = time.time()
 
@@ -949,14 +1066,12 @@ def train_fn(
                     "resolved_gin_config_sha256": resolved_gin_config_sha256,
                     "experiment_config_sha256": experiment_config_sha256,
                     **source_provenance,
+                    **slurm_provenance,
                 },
                 f"{ckpt_prefix}_ep{epoch}",
             )
         if _wandb_run is not None:
-            try:
-                _wandb_run.finish()
-            except Exception as error:
-                logging.warning("Weights & Biases finalization failed: %s", error)
+            _wandb_finish(_wandb_run, required=wandb_required)
 
     if world_size > 1:
         cleanup()

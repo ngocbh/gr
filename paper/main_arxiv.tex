@@ -156,7 +156,7 @@ tail of SiLU, rather than from removing softmax's row denominator.
 \subsection{Forgetting while retaining explicit pairs}
 
 Old events can become irrelevant when user intent changes.  A scalar per-head
-forget gate $f_t^h\in(0,1]$ defines the survival of event $j$ at query $i$,
+forget gate $f_t^h\in(0,1)$ defines the survival of event $j$ at query $i$,
 \begin{equation}
   F^h_{ij}=\prod_{\ell=j+1}^{i}f_\ell^h,
   \qquad F^h_{ii}=1.
@@ -169,9 +169,10 @@ applied to HSTU without changing its explicit-pair representation.
 
 There is an important asymmetry.  Write $\log F^h_{ij}=P_i^h-P_j^h$ for
 prefix log-survival.  In row softmax, $P_i^h$ cancels, so FoSoftmax is exactly
-$\softmax_j(s^h_{ij}-P_j^h)$: it redistributes mass among keys but cannot
-suppress a head's total amplitude.  With a fixed gate it reduces to a
-head-specific linear recency bias.  Neither cancellation occurs when
+$\softmax_j(s^h_{ij}-P_j^h)$: it redistributes mass among keys but cannot change
+the total coefficient mass, which remains one.  That redistribution can still
+change the value aggregate's norm and direction.  With a fixed gate it reduces
+to a head-specific linear recency bias.  Neither cancellation occurs when
 $F^h_{ij}$ multiplies HSTU's unnormalized signed coefficients.
 
 \begin{quote}
@@ -196,9 +197,10 @@ We propose Signed Additive Forgetting Attention (SAFA),
 \end{align}
 Earlier experiment configs and checkpoints call this same mechanism
 \texttt{FoHSTU}; we retain that string only as a provenance identifier.
-It has four useful properties.  First, $f_i^h=1$ recovers HSTU, so the proposal
-is nested rather than a new block topology.  Second, multiplication preserves
-the sign of every SiLU coefficient.  Third, each head can learn a different
+It has four useful properties.  First, HSTU lies in the closure as
+$f_i^h\to1$; the matched control sets $F_{ij}^h=1$ exactly, so the proposal is
+nested rather than a new block topology.  Second, multiplication preserves the
+sign of every SiLU coefficient.  Third, each head can learn a different
 content-dependent horizon.  Fourth, the pairwise position/time bias remains
 available; the gate adds path information from the events between $j$ and
 $i$, which an endpoint-only relative bias cannot represent.
@@ -286,8 +288,10 @@ seeds 42--44 on MovieLens-1M for qualification and repeat
 the same frozen configuration on MovieLens-20M.  The primary statistic is
 mean NDCG@10 over epochs 96--100; report the paired per-seed delta, sample
 standard deviation, minimum delta, HR@10, MRR, and equal-work throughput.
-Source, scheduler submission, and event files must be checksum-bound before a
-result is eligible for the paper.
+Before a result is eligible for the paper, the source snapshot and resolved
+configuration must be checksum-bound, the scheduler array identity and actual
+QoS must match the frozen submission, and the exported metric record must carry
+an input checksum.
 
 Before inspecting these clean runs, freeze the qualification rule: the mean
 paired SAFA-minus-HSTU NDCG@10 delta must be at least 0.002, at least two of
@@ -333,12 +337,14 @@ Corrected per-head softmax & Does normalization matter after fixing head shape a
 \end{tabularx}
 \end{center}
 
-For the primary A/B, log per-head gate and survival quantiles, effective
-half-life, negative coefficient mass, performance by history length, and
-elapsed-time gap.  If SAFA passes the frozen rule while fixed survival and
-FoSoftmax do not, the supported mechanism is content-dependent survival acting
-on HSTU's signed, unnormalized coefficients.  Otherwise the result does not
-justify a more complicated gate sweep on the same seeds.
+For the primary A/B, analyze the final checkpoints on deterministic held-out
+batches for per-head gate and survival quantiles, effective half-life, negative
+coefficient mass, performance by history length, and elapsed-time gap.  These
+diagnostics interpret the frozen accuracy test; they do not alter it.  If SAFA
+passes the rule while fixed survival and FoSoftmax do not, the supported
+mechanism is content-dependent survival acting on HSTU's signed, unnormalized
+coefficients.  Otherwise the result does not justify a more complicated gate
+sweep on the same seeds.
 
 
 % =============================================================================

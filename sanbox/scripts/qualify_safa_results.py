@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Apply the frozen paired-seed SAFA quality gate to exported run metrics.
 
-Input is a JSON object with ``schema_version: 2`` and six entries in ``runs``.
+Input is a JSON object with ``schema_version: 3`` and six entries in ``runs``.
 Each run has the following shape::
 
     {
@@ -16,6 +16,12 @@ Each run has the following shape::
       "arm": "hstu",
       "attention_mode": "hstu",
       "random_seed": 42,
+      "slurm_array_job_id": "123456",
+      "slurm_array_task_id": 0,
+      "slurm_job_id": "123456",
+      "slurm_job_qos": "h200_mrs_shared",
+      "slurm_restart_count": 0,
+      "slurm_job_partition": "h200",
       "resolved_gin_config": "<operative Gin config>",
       "resolved_gin_config_sha256": "<exact config sha256>",
       "experiment_config_sha256": "<mode/seed-normalized config sha256>",
@@ -24,6 +30,7 @@ Each run has the following shape::
 
 Extra epochs are allowed, but epochs 96 through 100 must be present exactly once.
 All provenance and inventory fields must agree across the six runs.
+The CLI independently verifies the six completed allocations with ``sacct``.
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ import json
 import os
 import re
 import statistics
+import subprocess
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -43,12 +51,34 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 SEEDS = (42, 43, 44)
 ARMS = ("hstu", "safa")
+EXPECTED_TASKS = (
+    (42, "hstu"),
+    (42, "safa"),
+    (43, "hstu"),
+    (43, "safa"),
+    (44, "hstu"),
+    (44, "safa"),
+)
 FINAL_EPOCHS = (96, 97, 98, 99, 100)
 MEAN_DELTA_THRESHOLD = 0.002
 POSITIVE_SEED_THRESHOLD = 2
 MIN_DELTA_THRESHOLD = -0.001
 HEX_GIT_ID = re.compile(r"[0-9a-f]{40}")
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
+POSITIVE_DECIMAL_ID = re.compile(r"[1-9][0-9]*")
+REQUIRED_QOS = "h200_mrs_shared"
+REQUIRED_PARTITION = "h200"
+SACCT_FIELDS = "JobIDRaw,JobID,State,ExitCode,Restarts,QOS,Partition"
+SCHEDULER_RECEIPT_KEYS = {
+    "slurm_array_job_id",
+    "slurm_array_task_id",
+    "slurm_job_id",
+    "slurm_restart_count",
+    "slurm_job_qos",
+    "slurm_job_partition",
+    "state",
+    "exit_code",
+}
 EXPECTED_PARAMETER_COUNTS = {
     "ml-1m": 313_416,
     "ml-20m": 38_917_344,
@@ -69,6 +99,12 @@ RUN_KEYS = {
     "arm",
     "attention_mode",
     "random_seed",
+    "slurm_array_job_id",
+    "slurm_array_task_id",
+    "slurm_job_id",
+    "slurm_job_qos",
+    "slurm_restart_count",
+    "slurm_job_partition",
     "resolved_gin_config",
     "resolved_gin_config_sha256",
     "experiment_config_sha256",
@@ -83,6 +119,9 @@ CONSISTENT_METADATA_KEYS = (
     "parameter_count",
     "metric",
     "experiment_config_sha256",
+    "slurm_array_job_id",
+    "slurm_job_qos",
+    "slurm_job_partition",
 )
 EXPERIMENT_IDENTITY_BINDINGS = (
     "hstu_encoder.attention_mode",
@@ -137,8 +176,8 @@ def load_results(path: Path) -> Mapping[str, Any]:
         raise ResultsError("results document must be a JSON object")
     if set(document) != {"schema_version", "runs"}:
         raise ResultsError("document keys must be exactly schema_version and runs")
-    if document["schema_version"] != 2:
-        raise ResultsError("schema_version must be 2")
+    if document["schema_version"] != 3:
+        raise ResultsError("schema_version must be 3")
     if not isinstance(document["runs"], list):
         raise ResultsError("runs must be a JSON list")
     return document
@@ -149,6 +188,161 @@ def _require_string(run: Mapping[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise ResultsError(f"{key} must be a nonempty string")
     return value
+
+
+def _require_job_id(run: Mapping[str, Any], key: str) -> str:
+    value = _require_string(run, key)
+    if POSITIVE_DECIMAL_ID.fullmatch(value) is None:
+        raise ResultsError(f"{key} must be a positive decimal job ID string")
+    return value
+
+
+def _require_nonnegative_int(value: Any, key: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ResultsError(f"{key} must be a nonnegative integer")
+    return value
+
+
+def validate_scheduler_receipt(
+    receipt: Mapping[int, Mapping[str, Any]],
+    *,
+    expected_array_job_id: str,
+) -> None:
+    if (
+        not isinstance(expected_array_job_id, str)
+        or POSITIVE_DECIMAL_ID.fullmatch(expected_array_job_id) is None
+    ):
+        raise ResultsError("expected array job ID must be a positive decimal string")
+    if (
+        not isinstance(receipt, Mapping)
+        or any(type(task_id) is not int for task_id in receipt)
+        or set(receipt) != set(range(6))
+    ):
+        raise ResultsError("scheduler receipt must contain exactly tasks 0 through 5")
+
+    raw_job_ids = set()
+    for task_id in range(6):
+        record = receipt[task_id]
+        if not isinstance(record, Mapping) or set(record) != SCHEDULER_RECEIPT_KEYS:
+            raise ResultsError(f"scheduler receipt task {task_id} has invalid fields")
+        if record["slurm_array_job_id"] != expected_array_job_id:
+            raise ResultsError("scheduler receipt has the wrong array job ID")
+        if (
+            type(record["slurm_array_task_id"]) is not int
+            or record["slurm_array_task_id"] != task_id
+        ):
+            raise ResultsError("scheduler receipt task ID does not match its key")
+        raw_job_id = record["slurm_job_id"]
+        if (
+            not isinstance(raw_job_id, str)
+            or POSITIVE_DECIMAL_ID.fullmatch(raw_job_id) is None
+        ):
+            raise ResultsError("scheduler JobIDRaw must be a positive decimal string")
+        if raw_job_id in raw_job_ids:
+            raise ResultsError("scheduler JobIDRaw values must be distinct")
+        raw_job_ids.add(raw_job_id)
+        _require_nonnegative_int(record["slurm_restart_count"], "scheduler Restarts")
+        if record["state"] != "COMPLETED":
+            raise ResultsError(f"scheduler task {task_id} did not complete")
+        if record["exit_code"] != "0:0":
+            raise ResultsError(f"scheduler task {task_id} has a nonzero exit code")
+        if record["slurm_job_qos"] != REQUIRED_QOS:
+            raise ResultsError(f"scheduler task {task_id} used the wrong QoS")
+        if record["slurm_job_partition"] != REQUIRED_PARTITION:
+            raise ResultsError(f"scheduler task {task_id} used the wrong partition")
+
+
+def parse_sacct_receipt(
+    output: str,
+    *,
+    expected_array_job_id: str,
+) -> Dict[int, Dict[str, Any]]:
+    """Parse allocation-only, pipe-delimited sacct output for one array."""
+    if (
+        not isinstance(expected_array_job_id, str)
+        or POSITIVE_DECIMAL_ID.fullmatch(expected_array_job_id) is None
+    ):
+        raise ResultsError("expected array job ID must be a positive decimal string")
+    if not isinstance(output, str) or not output:
+        raise ResultsError("sacct returned no scheduler records")
+    records: Dict[int, Dict[str, Any]] = {}
+    lines = output.splitlines()
+    if not lines or any(not line for line in lines):
+        raise ResultsError("sacct returned malformed scheduler records")
+    for line in lines:
+        fields = line.split("|")
+        if len(fields) != 7:
+            raise ResultsError(
+                "sacct scheduler record must contain exactly seven fields"
+            )
+        (
+            job_id_raw,
+            job_id,
+            state,
+            exit_code,
+            restarts,
+            qos,
+            partition,
+        ) = fields
+        match = re.fullmatch(rf"{re.escape(expected_array_job_id)}_([0-9]+)", job_id)
+        if match is None:
+            raise ResultsError("sacct JobID does not identify the expected array task")
+        task_id = int(match.group(1))
+        if task_id not in range(6):
+            raise ResultsError(f"sacct returned unexpected array task {task_id}")
+        if task_id in records:
+            raise ResultsError(f"sacct returned duplicate array task {task_id}")
+        if re.fullmatch(r"0|[1-9][0-9]*", restarts) is None:
+            raise ResultsError("sacct Restarts must be a nonnegative integer")
+        records[task_id] = {
+            "slurm_array_job_id": expected_array_job_id,
+            "slurm_array_task_id": task_id,
+            "slurm_job_id": job_id_raw,
+            "slurm_restart_count": int(restarts),
+            "slurm_job_qos": qos,
+            "slurm_job_partition": partition,
+            "state": state,
+            "exit_code": exit_code,
+        }
+    validate_scheduler_receipt(
+        records,
+        expected_array_job_id=expected_array_job_id,
+    )
+    return records
+
+
+def query_sacct_receipt(expected_array_job_id: str) -> Dict[int, Dict[str, Any]]:
+    if (
+        not isinstance(expected_array_job_id, str)
+        or POSITIVE_DECIMAL_ID.fullmatch(expected_array_job_id) is None
+    ):
+        raise ResultsError("expected array job ID must be a positive decimal string")
+    command = [
+        "sacct",
+        "--jobs",
+        expected_array_job_id,
+        "--allocations",
+        "--noheader",
+        "--parsable2",
+        f"--format={SACCT_FIELDS}",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as error:
+        raise ResultsError(f"could not query sacct: {error}") from error
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit status {completed.returncode}"
+        raise ResultsError(f"sacct query failed: {detail}")
+    return parse_sacct_receipt(
+        completed.stdout,
+        expected_array_job_id=expected_array_job_id,
+    )
 
 
 def operative_config_identities(
@@ -244,6 +438,25 @@ def _validate_run_metadata(run: Mapping[str, Any]) -> None:
         raise ResultsError(f"random_seed must be one of {SEEDS}")
     if random_seed != seed:
         raise ResultsError("random_seed does not match seed")
+    _require_job_id(run, "slurm_array_job_id")
+    _require_job_id(run, "slurm_job_id")
+    task_id = run["slurm_array_task_id"]
+    if (
+        isinstance(task_id, bool)
+        or not isinstance(task_id, int)
+        or not 0 <= task_id < 6
+    ):
+        raise ResultsError("slurm_array_task_id must be an integer in [0, 5]")
+    expected_seed, expected_arm = EXPECTED_TASKS[task_id]
+    if (seed, run["arm"]) != (expected_seed, expected_arm):
+        raise ResultsError(
+            "slurm_array_task_id does not match the recorded seed/arm mapping"
+        )
+    if _require_string(run, "slurm_job_qos") != REQUIRED_QOS:
+        raise ResultsError(f"slurm_job_qos must be {REQUIRED_QOS}")
+    _require_nonnegative_int(run["slurm_restart_count"], "slurm_restart_count")
+    if _require_string(run, "slurm_job_partition") != REQUIRED_PARTITION:
+        raise ResultsError(f"slurm_job_partition must be {REQUIRED_PARTITION}")
 
     resolved_gin_config = _require_string(run, "resolved_gin_config")
     resolved_sha256, experiment_sha256 = operative_config_identities(
@@ -298,17 +511,25 @@ def qualify_results(
     expected_source_tree: str,
     expected_source_manifest: str,
     expected_experiment_config_sha256: str,
+    expected_array_job_id: str,
+    scheduler_receipt: Mapping[int, Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    if document.get("schema_version") != 2 or not isinstance(
+    if document.get("schema_version") != 3 or not isinstance(
         document.get("runs"), list
     ):
         raise ResultsError("invalid results document")
     runs: List[Mapping[str, Any]] = document["runs"]
     if len(runs) != len(SEEDS) * len(ARMS):
         raise ResultsError("runs must contain exactly six paired seed/arm entries")
+    validate_scheduler_receipt(
+        scheduler_receipt,
+        expected_array_job_id=expected_array_job_id,
+    )
 
     baseline_metadata: Optional[Dict[str, Any]] = None
     final_means: Dict[Tuple[int, str], Decimal] = {}
+    task_ids = set()
+    run_job_ids = set()
     for run in runs:
         if not isinstance(run, dict):
             raise ResultsError("every run must be a JSON object")
@@ -325,6 +546,27 @@ def qualify_results(
             raise ResultsError(f"mismatched run metadata: {differing}")
 
         run_key = (int(run["seed"]), str(run["arm"]))
+        task_id = int(run["slurm_array_task_id"])
+        if task_id in task_ids:
+            raise ResultsError(f"duplicate SLURM array task ID: {task_id}")
+        task_ids.add(task_id)
+        run_job_id = str(run["slurm_job_id"])
+        if run_job_id in run_job_ids:
+            raise ResultsError("run SLURM job IDs must be distinct")
+        run_job_ids.add(run_job_id)
+        scheduler_record = scheduler_receipt[task_id]
+        for key in (
+            "slurm_array_job_id",
+            "slurm_array_task_id",
+            "slurm_job_id",
+            "slurm_restart_count",
+            "slurm_job_qos",
+            "slurm_job_partition",
+        ):
+            if run[key] != scheduler_record[key]:
+                raise ResultsError(
+                    f"run {key} does not match the authoritative scheduler receipt"
+                )
         if run_key in final_means:
             raise ResultsError(f"duplicate run for seed={run_key[0]} arm={run_key[1]}")
         values = _epoch_values(run)
@@ -336,6 +578,9 @@ def qualify_results(
     if set(final_means) != expected_keys:
         missing = sorted(expected_keys - set(final_means))
         raise ResultsError(f"missing seed/arm runs: {missing}")
+    if task_ids != set(range(6)):
+        missing_tasks = sorted(set(range(6)) - task_ids)
+        raise ResultsError(f"missing SLURM array task IDs: {missing_tasks}")
     assert baseline_metadata is not None
     if baseline_metadata["dataset"] != expected_dataset:
         raise ResultsError(
@@ -348,6 +593,15 @@ def qualify_results(
         raise ResultsError("source commit does not match the externally pinned value")
     if baseline_metadata["source_tree"] != expected_source_tree:
         raise ResultsError("source tree does not match the externally pinned value")
+    if (
+        not isinstance(expected_array_job_id, str)
+        or POSITIVE_DECIMAL_ID.fullmatch(expected_array_job_id) is None
+    ):
+        raise ResultsError("expected array job ID must be a positive decimal string")
+    if baseline_metadata["slurm_array_job_id"] != expected_array_job_id:
+        raise ResultsError(
+            "SLURM array job ID does not match the externally pinned value"
+        )
     if HEX_SHA256.fullmatch(expected_experiment_config_sha256) is None:
         raise ResultsError(
             "expected experiment config identity must be a lowercase SHA-256"
@@ -392,6 +646,9 @@ def qualify_results(
         "status": "pass" if passed else "fail",
         "passed": passed,
         "metadata": baseline_metadata,
+        "scheduler_receipt": {
+            str(task_id): dict(scheduler_receipt[task_id]) for task_id in range(6)
+        },
         "final_epochs": list(FINAL_EPOCHS),
         "thresholds": {
             "mean_delta_min": MEAN_DELTA_THRESHOLD,
@@ -439,6 +696,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--expected-source-tree", required=True)
     parser.add_argument("--expected-source-manifest", required=True)
     parser.add_argument("--expected-experiment-config-sha256", required=True)
+    parser.add_argument("--expected-array-job-id", required=True)
     parser.add_argument("--output", type=Path)
     return parser.parse_args(argv)
 
@@ -448,6 +706,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     try:
         input_sha256 = _sha256(args.results)
         document = load_results(args.results)
+        scheduler_receipt = query_sacct_receipt(args.expected_array_job_id)
         summary = qualify_results(
             document,
             expected_dataset=args.expected_dataset,
@@ -455,6 +714,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             expected_source_tree=args.expected_source_tree,
             expected_source_manifest=args.expected_source_manifest,
             expected_experiment_config_sha256=(args.expected_experiment_config_sha256),
+            expected_array_job_id=args.expected_array_job_id,
+            scheduler_receipt=scheduler_receipt,
         )
     except ResultsError as error:
         summary = {"status": "invalid", "passed": False, "error": str(error)}

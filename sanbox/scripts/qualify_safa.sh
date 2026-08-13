@@ -9,9 +9,37 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${GR_EXPS_ROOT:?GR_EXPS_ROOT must be set}"
 : "${GR_CKPTS_ROOT:?GR_CKPTS_ROOT must be set}"
 
-actual_qos="${SLURM_JOB_QOS:-}"
-if [[ -z "$actual_qos" && -n "${SLURM_JOB_ID:-}" ]]; then
-  actual_qos="$(scontrol show job "$SLURM_JOB_ID" -o | sed -n 's/.* QOS=\([^ ]*\).*/\1/p')"
+: "${SLURM_JOB_ID:?qualification must run inside SLURM}"
+reported_qos="${SLURM_JOB_QOS:-}"
+reported_partition="${SLURM_JOB_PARTITION:-}"
+reported_restart_count="${SLURM_RESTART_COUNT:-}"
+scheduler_record="$(scontrol show job "$SLURM_JOB_ID" -o)"
+actual_qos="$(sed -n 's/.* QOS=\([^ ]*\).*/\1/p' <<<"$scheduler_record")"
+actual_partition="$(sed -n \
+  's/.* Partition=\([^ ]*\).*/\1/p' <<<"$scheduler_record")"
+actual_restart_count="$(sed -n \
+  's/.* Restarts=\([^ ]*\).*/\1/p' <<<"$scheduler_record")"
+if [[ -z "$actual_qos" || -z "$actual_partition" ]]; then
+  echo "could not resolve qualification QoS and partition from SLURM" >&2
+  exit 1
+fi
+if [[ ! "$actual_restart_count" =~ ^(0|[1-9][0-9]*)$ ]]; then
+  echo "could not resolve qualification restart count from SLURM" >&2
+  exit 1
+fi
+if [[ -n "$reported_restart_count" && \
+      "$reported_restart_count" != "$actual_restart_count" ]]; then
+  echo "qualification SLURM_RESTART_COUNT disagrees with scheduler state" >&2
+  exit 1
+fi
+if [[ -n "$reported_qos" && "$reported_qos" != "$actual_qos" ]]; then
+  echo "qualification SLURM_JOB_QOS disagrees with scheduler state" >&2
+  exit 1
+fi
+if [[ -n "$reported_partition" && \
+      "$reported_partition" != "$actual_partition" ]]; then
+  echo "qualification SLURM_JOB_PARTITION disagrees with scheduler state" >&2
+  exit 1
 fi
 if [[ "$actual_qos" == "h200_dev" ]]; then
   echo "refusing qualification on h200_dev" >&2
@@ -21,6 +49,13 @@ if [[ "$actual_qos" != "h200_mrs_shared" ]]; then
   echo "qualification requires QoS h200_mrs_shared" >&2
   exit 1
 fi
+if [[ "$actual_partition" != "h200" ]]; then
+  echo "qualification requires partition h200" >&2
+  exit 1
+fi
+export SLURM_JOB_QOS="$actual_qos"
+export SLURM_JOB_PARTITION="$actual_partition"
+export SLURM_RESTART_COUNT="$actual_restart_count"
 
 verifier_python="$(command -v python3)"
 provenance_exports="$($verifier_python "$repo_root/scripts/snapshot.py" verify \
@@ -28,6 +63,8 @@ provenance_exports="$($verifier_python "$repo_root/scripts/snapshot.py" verify \
 eval "$provenance_exports"
 unset GR_EXPECTED_EXPERIMENT_CONFIG_SHA256 \
   GR_CONFIG_IDENTITY_ONLY GR_CONFIG_IDENTITY_OUTPUT
+# Keep the canonical identity independent of interactive W&B mode overrides.
+unset WANDB_MODE WANDB_DISABLED WANDB_RUN_ID WANDB_RESUME WANDB_SWEEP_ID
 
 : "${GR_CONDA_ENV:=gr}"
 if [[ -n "${GR_PYTHON:-}" ]]; then
@@ -100,7 +137,7 @@ for dataset in ml-1m ml-20m; do
     else
       config="configs/$dataset/safa-sampled-softmax-n128-large-final.gin"
     fi
-    run_name="qualification-$dataset-$mode-seed42-${SLURM_JOB_ID:-local}"
+    run_name="qualification-$dataset-$mode-seed42-$SLURM_JOB_ID-r$actual_restart_count"
     GR_WANDB_ENABLED=0 \
     GR_SEED=42 \
     GR_EXPS_ROOT="$qualification_exps" \
@@ -127,6 +164,10 @@ umask 077
   echo "source_commit=$GR_SOURCE_COMMIT"
   echo "source_tree=$GR_SOURCE_TREE"
   echo "source_manifest=$GR_SOURCE_MANIFEST"
+  echo "qualification_job_id=$SLURM_JOB_ID"
+  echo "qualification_job_qos=$actual_qos"
+  echo "qualification_job_partition=$actual_partition"
+  echo "qualification_restart_count=$actual_restart_count"
   echo "experiment_config_ml-1m=${expected_config_identities[ml-1m]}"
   echo "experiment_config_ml-20m=${expected_config_identities[ml-20m]}"
 } >"$temporary_marker"

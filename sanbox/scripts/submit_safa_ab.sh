@@ -34,7 +34,7 @@ commit="$(<"$snapshot/SOURCE_COMMIT")"
 tree="$(<"$snapshot/SOURCE_TREE")"
 qualification_marker="$GR_QUALIFICATION_ROOT/$manifest.passed"
 
-common_export="ALL,GR_EXPECTED_SOURCE_MANIFEST=$manifest,GR_DATA_ROOT=$GR_DATA_ROOT,GR_EXPS_ROOT=$GR_EXPS_ROOT,GR_CKPTS_ROOT=$GR_CKPTS_ROOT,GR_QUALIFICATION_ROOT=$GR_QUALIFICATION_ROOT"
+common_export="ALL,GR_EXPECTED_SOURCE_MANIFEST=$manifest,GR_DATA_ROOT=$GR_DATA_ROOT,GR_EXPS_ROOT=$GR_EXPS_ROOT,GR_CKPTS_ROOT=$GR_CKPTS_ROOT,GR_QUALIFICATION_ROOT=$GR_QUALIFICATION_ROOT,GR_REQUIRE_WANDB=0,GR_REQUIRE_SLURM_PROVENANCE=0"
 qualification_job="$(sbatch --parsable \
   --partition=h200 --qos=h200_mrs_shared \
   --export="$common_export" \
@@ -53,13 +53,21 @@ ml20m_job="$(sbatch --parsable \
   --dependency="afterok:$qualification_job" \
   --export="$common_export,GR_DATASET=ml-20m" \
   "$snapshot/scripts/sbatch_safa_ab.sh")"
+ml1m_job="${ml1m_job%%;*}"
+ml20m_job="${ml20m_job%%;*}"
+for array_job in "$ml1m_job" "$ml20m_job"; do
+  if [[ ! "$array_job" =~ ^[1-9][0-9]*$ ]]; then
+    echo "sbatch returned an invalid array job ID: $array_job" >&2
+    exit 1
+  fi
+done
 
 echo "source_snapshot=$snapshot"
 echo "source_commit=$commit"
 echo "source_tree=$tree"
 echo "source_manifest=$manifest"
 echo "qualification_job=${qualification_job%%;*}"
-echo "ml1m_array_job=${ml1m_job%%;*}"
-echo "ml20m_array_job=${ml20m_job%%;*}"
-echo "postrun_ml1m=/bin/bash $snapshot/scripts/check_safa_results.sh RESULTS.json --expected-dataset ml-1m --expected-source-commit $commit --expected-source-tree $tree --expected-source-manifest $manifest --expected-experiment-config-sha256 \$(sed -n 's/^experiment_config_ml-1m=//p' '$qualification_marker')"
-echo "postrun_ml20m=/bin/bash $snapshot/scripts/check_safa_results.sh RESULTS.json --expected-dataset ml-20m --expected-source-commit $commit --expected-source-tree $tree --expected-source-manifest $manifest --expected-experiment-config-sha256 \$(sed -n 's/^experiment_config_ml-20m=//p' '$qualification_marker')"
+echo "ml1m_array_job=$ml1m_job"
+echo "ml20m_array_job=$ml20m_job"
+echo "postrun_ml1m=/bin/bash $snapshot/scripts/check_safa_results.sh RESULTS.json --expected-dataset ml-1m --expected-source-commit $commit --expected-source-tree $tree --expected-source-manifest $manifest --expected-experiment-config-sha256 \$(sed -n 's/^experiment_config_ml-1m=//p' '$qualification_marker') --expected-array-job-id $ml1m_job"
+echo "postrun_ml20m=/bin/bash $snapshot/scripts/check_safa_results.sh RESULTS.json --expected-dataset ml-20m --expected-source-commit $commit --expected-source-tree $tree --expected-source-manifest $manifest --expected-experiment-config-sha256 \$(sed -n 's/^experiment_config_ml-20m=//p' '$qualification_marker') --expected-array-job-id $ml20m_job"

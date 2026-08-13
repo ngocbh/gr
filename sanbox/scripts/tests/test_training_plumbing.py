@@ -19,6 +19,11 @@ from generative_recommenders.research.trainer.data_loader import create_data_loa
 from generative_recommenders.research.trainer.train import (
     _config_identities,
     _seed_everything,
+    _slurm_provenance,
+    _wandb_finish,
+    _wandb_initialize,
+    _wandb_log,
+    _wandb_requirement,
     cleanup,
 )
 from scripts.qualify_safa_results import operative_config_identities
@@ -93,6 +98,134 @@ class SingleProcessTest(unittest.TestCase):
             )
         all_reduce.assert_not_called()
         torch.testing.assert_close(average, torch.tensor(0.2))
+
+
+class SlurmProvenanceTest(unittest.TestCase):
+    def test_all_six_canonical_tasks_are_recorded(self) -> None:
+        expected_runs = (
+            (42, "hstu"),
+            (42, "safa"),
+            (43, "hstu"),
+            (43, "safa"),
+            (44, "hstu"),
+            (44, "safa"),
+        )
+        for task_id, (seed, arm) in enumerate(expected_runs):
+            with self.subTest(task_id=task_id):
+                environment = {
+                    "GR_REQUIRE_SLURM_PROVENANCE": "1",
+                    "SLURM_ARRAY_JOB_ID": "123456",
+                    "SLURM_ARRAY_TASK_ID": str(task_id),
+                    "SLURM_JOB_ID": str(123456 + task_id),
+                    "SLURM_JOB_QOS": "h200_mrs_shared",
+                    "SLURM_RESTART_COUNT": "0",
+                    "SLURM_JOB_PARTITION": "h200",
+                }
+                with mock.patch.dict(os.environ, environment, clear=True):
+                    provenance = _slurm_provenance(
+                        attention_mode=arm,
+                        random_seed=seed,
+                    )
+                self.assertEqual(
+                    provenance,
+                    {
+                        "slurm_array_job_id": "123456",
+                        "slurm_array_task_id": task_id,
+                        "slurm_job_id": str(123456 + task_id),
+                        "slurm_job_qos": "h200_mrs_shared",
+                        "slurm_restart_count": 0,
+                        "slurm_job_partition": "h200",
+                    },
+                )
+
+    def test_required_provenance_rejects_missing_invalid_or_mismatched_values(
+        self,
+    ) -> None:
+        valid = {
+            "GR_REQUIRE_SLURM_PROVENANCE": "1",
+            "SLURM_ARRAY_JOB_ID": "123456",
+            "SLURM_ARRAY_TASK_ID": "0",
+            "SLURM_JOB_ID": "123456",
+            "SLURM_JOB_QOS": "h200_mrs_shared",
+            "SLURM_RESTART_COUNT": "0",
+            "SLURM_JOB_PARTITION": "h200",
+        }
+        mutations = (
+            ("missing", "SLURM_JOB_ID", None),
+            ("array ID", "SLURM_ARRAY_JOB_ID", "0"),
+            ("task ID", "SLURM_ARRAY_TASK_ID", "6"),
+            ("job ID", "SLURM_JOB_ID", "123_0"),
+            ("QoS", "SLURM_JOB_QOS", "h200_dev"),
+            ("restart", "SLURM_RESTART_COUNT", "-1"),
+            ("partition", "SLURM_JOB_PARTITION", "debug"),
+        )
+        for label, key, value in mutations:
+            with self.subTest(label=label):
+                environment = dict(valid)
+                if value is None:
+                    del environment[key]
+                else:
+                    environment[key] = value
+                with mock.patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaises(ValueError):
+                        _slurm_provenance(attention_mode="hstu", random_seed=42)
+
+        with mock.patch.dict(os.environ, valid, clear=True):
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                _slurm_provenance(attention_mode="safa", random_seed=42)
+
+    def test_scheduler_provenance_is_optional_outside_full_arrays(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"GR_REQUIRE_SLURM_PROVENANCE": "0"},
+            clear=True,
+        ):
+            self.assertEqual(
+                _slurm_provenance(attention_mode="hstu", random_seed=42), {}
+            )
+
+
+class RequiredWandbTest(unittest.TestCase):
+    def test_requirement_flag_is_strict_and_requires_online_enabled_run(self) -> None:
+        with mock.patch.dict(os.environ, {"GR_REQUIRE_WANDB": "1"}, clear=True):
+            self.assertTrue(_wandb_requirement(wandb_enabled=True, wandb_mode="online"))
+            with self.assertRaisesRegex(ValueError, "wandb_enabled"):
+                _wandb_requirement(wandb_enabled=False, wandb_mode="online")
+            with self.assertRaisesRegex(ValueError, "WANDB_MODE"):
+                _wandb_requirement(wandb_enabled=True, wandb_mode="offline")
+        with mock.patch.dict(os.environ, {"GR_REQUIRE_WANDB": "yes"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "must be 0 or 1"):
+                _wandb_requirement(wandb_enabled=True, wandb_mode="online")
+
+    def test_required_initialization_fails_closed(self) -> None:
+        module_path = "generative_recommenders.research.trainer.train.wandb"
+        with mock.patch(module_path, None):
+            with self.assertRaisesRegex(RuntimeError, "not installed"):
+                _wandb_initialize(required=True, init_kwargs={})
+
+        failing_wandb = mock.Mock()
+        failing_wandb.init.side_effect = OSError("network unavailable")
+        with mock.patch(module_path, failing_wandb):
+            with self.assertRaisesRegex(RuntimeError, "initialization failed"):
+                _wandb_initialize(required=True, init_kwargs={})
+
+        empty_wandb = mock.Mock()
+        empty_wandb.init.return_value = None
+        with mock.patch(module_path, empty_wandb):
+            with self.assertRaisesRegex(RuntimeError, "returned no run"):
+                _wandb_initialize(required=True, init_kwargs={})
+
+    def test_required_logging_and_finalization_fail_closed(self) -> None:
+        run = mock.Mock()
+        run.log.side_effect = OSError("logging failed")
+        with self.assertRaisesRegex(RuntimeError, "logging failed"):
+            _wandb_log(run, {"metric": 1.0}, 7, required=True)
+        _wandb_log(run, {"metric": 1.0}, 7, required=False)
+
+        run.finish.side_effect = OSError("finish failed")
+        with self.assertRaisesRegex(RuntimeError, "finalization failed"):
+            _wandb_finish(run, required=True)
+        _wandb_finish(run, required=False)
 
 
 class GinBindingsTest(unittest.TestCase):
@@ -171,6 +304,10 @@ class SlurmContractTest(unittest.TestCase):
         self.assertIn("SLURM_ARRAY_TASK_ID % 2", wrapper)
         self.assertIn('== "h200_dev"', wrapper)
         self.assertIn("GR_EXPECTED_EXPERIMENT_CONFIG_SHA256", wrapper)
+        self.assertIn("GR_REQUIRE_SLURM_PROVENANCE=1", wrapper)
+        self.assertIn("GR_REQUIRE_WANDB=1", wrapper)
+        self.assertIn("unset WANDB_MODE WANDB_DISABLED", wrapper)
+        self.assertIn("WANDB_RUN_ID WANDB_RESUME WANDB_SWEEP_ID", wrapper)
         self.assertNotIn("master_port", wrapper)
         self.assertNotIn("SLURM_ARRAY_JOB_ID:-0", wrapper)
 
@@ -179,6 +316,13 @@ class SlurmContractTest(unittest.TestCase):
         self.assertIn("GR_CONFIG_IDENTITY_ONLY=1", qualifier)
         self.assertIn("experiment_config_ml-1m=", qualifier)
         self.assertIn("experiment_config_ml-20m=", qualifier)
+        self.assertIn("unset WANDB_MODE WANDB_DISABLED", qualifier)
+        self.assertIn("WANDB_RUN_ID WANDB_RESUME WANDB_SWEEP_ID", qualifier)
+        self.assertIn('scontrol show job "$SLURM_JOB_ID"', qualifier)
+        self.assertIn('actual_partition="$(sed -n', qualifier)
+        self.assertIn('"$actual_partition" != "h200"', qualifier)
+        self.assertIn("qualification_job_qos=$actual_qos", qualifier)
+        self.assertIn("qualification_job_partition=$actual_partition", qualifier)
 
     def test_submission_is_gated_on_qualification_for_both_datasets(self) -> None:
         submitter = (REPO_ROOT / "scripts/submit_safa_ab.sh").read_text(
@@ -192,6 +336,7 @@ class SlurmContractTest(unittest.TestCase):
         self.assertIn("postrun_ml1m=", submitter)
         self.assertIn("postrun_ml20m=", submitter)
         self.assertEqual(submitter.count("--expected-experiment-config-sha256"), 2)
+        self.assertEqual(submitter.count("--expected-array-job-id"), 2)
         self.assertNotIn("WANDB_API_KEY=", submitter)
 
     def test_array_task_map_reaches_pinned_snapshot_launcher(self) -> None:
@@ -223,6 +368,10 @@ class SlurmContractTest(unittest.TestCase):
                         f"source_commit={provenance['source_commit']}",
                         f"source_tree={provenance['source_tree']}",
                         f"source_manifest={provenance['source_manifest']}",
+                        "qualification_job_id=998",
+                        "qualification_job_qos=h200_mrs_shared",
+                        "qualification_job_partition=h200",
+                        "qualification_restart_count=0",
                         f"experiment_config_ml-1m={'d' * 64}",
                         f"experiment_config_ml-20m={'e' * 64}",
                     )
@@ -244,17 +393,43 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
     "wandb_group": os.environ["WANDB_RUN_GROUP"],
     "wandb_tags": os.environ["WANDB_TAGS"],
     "expected_experiment_config": os.environ["GR_EXPECTED_EXPERIMENT_CONFIG_SHA256"],
+    "require_slurm": os.environ["GR_REQUIRE_SLURM_PROVENANCE"],
+    "require_wandb": os.environ["GR_REQUIRE_WANDB"],
+    "slurm_array_job_id": os.environ["SLURM_ARRAY_JOB_ID"],
+    "slurm_array_task_id": os.environ["SLURM_ARRAY_TASK_ID"],
+    "slurm_job_id": os.environ["SLURM_JOB_ID"],
+    "slurm_job_qos": os.environ["SLURM_JOB_QOS"],
+    "slurm_restart_count": os.environ["SLURM_RESTART_COUNT"],
+    "slurm_job_partition": os.environ["SLURM_JOB_PARTITION"],
+    "wandb_mode": os.environ.get("WANDB_MODE"),
+    "wandb_run_id": os.environ.get("WANDB_RUN_ID"),
+    "wandb_resume": os.environ.get("WANDB_RESUME"),
+    "wandb_sweep_id": os.environ.get("WANDB_SWEEP_ID"),
 }), encoding="utf-8")
 """,
                 encoding="utf-8",
             )
             fake_python.chmod(0o755)
+            fake_bin = temporary_root / "bin"
+            fake_bin.mkdir()
+            fake_scontrol = fake_bin / "scontrol"
+            fake_scontrol.write_text(
+                "#!/usr/bin/env bash\n"
+                'task_id="${3#*_}"\n'
+                'job_id="$((1000 + task_id))"\n'
+                "printf 'JobId=%s ArrayJobId=999 ArrayTaskId=%s "
+                "Partition=h200 Restarts=0 QOS=h200_mrs_shared\\n' "
+                '"$job_id" "$task_id"\n',
+                encoding="utf-8",
+            )
+            fake_scontrol.chmod(0o755)
 
             for task_id, (seed, arm) in enumerate(expected_tasks):
                 with self.subTest(task_id=task_id):
                     capture = temporary_root / f"capture-{task_id}.json"
                     environment = {
                         **os.environ,
+                        "PATH": f"{fake_bin}:{os.environ['PATH']}",
                         "CAPTURE_PATH": str(capture),
                         "GR_PYTHON": str(fake_python),
                         "GR_EXPECTED_SOURCE_MANIFEST": provenance["source_manifest"],
@@ -265,9 +440,13 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                         "GR_QUALIFICATION_ROOT": str(qualification_root),
                         "GR_WANDB_ENABLED": "0",
                         "SLURM_JOB_QOS": "h200_mrs_shared",
-                        "SLURM_JOB_ID": "1000",
+                        "SLURM_JOB_PARTITION": "h200",
+                        "SLURM_JOB_ID": str(1000 + task_id),
                         "SLURM_ARRAY_JOB_ID": "999",
                         "SLURM_ARRAY_TASK_ID": str(task_id),
+                        "WANDB_RUN_ID": "stale-run",
+                        "WANDB_RESUME": "must",
+                        "WANDB_SWEEP_ID": "stale-sweep",
                     }
                     subprocess.run(
                         [
@@ -291,7 +470,7 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                         f"--gin_bindings=train_fn.random_seed={seed}", arguments
                     )
                     self.assertNotIn("train_fn.wandb_run_name", " ".join(arguments))
-                    expected_run_name = f"safa-ab-ml-1m-{arm}-seed{seed}-999"
+                    expected_run_name = f"safa-ab-ml-1m-{arm}-seed{seed}-999-r0"
                     self.assertEqual(captured["experiment_name"], expected_run_name)
                     self.assertEqual(captured["wandb_name"], expected_run_name)
                     self.assertEqual(
@@ -303,6 +482,82 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                         f"safa-ab,ml-1m,{arm},seed-{seed},parameter-matched",
                     )
                     self.assertEqual(captured["expected_experiment_config"], "d" * 64)
+                    self.assertEqual(captured["require_slurm"], "1")
+                    self.assertEqual(captured["require_wandb"], "1")
+                    self.assertEqual(captured["slurm_array_job_id"], "999")
+                    self.assertEqual(captured["slurm_array_task_id"], str(task_id))
+                    self.assertEqual(captured["slurm_job_id"], str(1000 + task_id))
+                    self.assertEqual(captured["slurm_job_qos"], "h200_mrs_shared")
+                    self.assertEqual(captured["slurm_restart_count"], "0")
+                    self.assertEqual(captured["slurm_job_partition"], "h200")
+                    self.assertIsNone(captured["wandb_mode"])
+                    self.assertIsNone(captured["wandb_run_id"])
+                    self.assertIsNone(captured["wandb_resume"])
+                    self.assertIsNone(captured["wandb_sweep_id"])
+
+            restart_capture = temporary_root / "capture-restart.json"
+            fake_scontrol.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' "
+                "'JobId=1005 ArrayJobId=999 ArrayTaskId=5 Partition=h200 "
+                "Restarts=2 QOS=h200_mrs_shared'\n",
+                encoding="utf-8",
+            )
+            restarted_environment = {
+                **environment,
+                "CAPTURE_PATH": str(restart_capture),
+                "SLURM_RESTART_COUNT": "2",
+            }
+            subprocess.run(
+                ["/bin/bash", str(snapshot / "scripts/sbatch_safa_ab.sh")],
+                check=True,
+                env=restarted_environment,
+                capture_output=True,
+                text=True,
+            )
+            restarted = json.loads(restart_capture.read_text(encoding="utf-8"))
+            self.assertTrue(restarted["experiment_name"].endswith("-999-r2"))
+            self.assertEqual(restarted["wandb_name"], restarted["experiment_name"])
+            self.assertEqual(restarted["slurm_restart_count"], "2")
+
+            for key, value, message in (
+                ("SLURM_RESTART_COUNT", "1", "SLURM_RESTART_COUNT disagrees"),
+                ("SLURM_JOB_PARTITION", "debug", "SLURM_JOB_PARTITION disagrees"),
+            ):
+                with self.subTest(mismatched_scheduler_field=key):
+                    mismatched_environment = {
+                        **restarted_environment,
+                        key: value,
+                    }
+                    mismatched = subprocess.run(
+                        ["/bin/bash", str(snapshot / "scripts/sbatch_safa_ab.sh")],
+                        check=False,
+                        env=mismatched_environment,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(mismatched.returncode, 0)
+                    self.assertIn(message, mismatched.stderr)
+
+            fake_scontrol.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' "
+                "'JobId=1005 ArrayJobId=999 ArrayTaskId=5 Partition=h200 "
+                "Restarts=0 QOS=h200_dev'\n",
+                encoding="utf-8",
+            )
+            rejected_environment = {
+                **environment,
+                "SLURM_JOB_QOS": "h200_dev",
+                "SLURM_RESTART_COUNT": "0",
+            }
+            rejected = subprocess.run(
+                ["/bin/bash", str(snapshot / "scripts/sbatch_safa_ab.sh")],
+                check=False,
+                env=rejected_environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("refusing experiment on h200_dev", rejected.stderr)
 
 
 class TrainLauncherTest(unittest.TestCase):
