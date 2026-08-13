@@ -84,6 +84,22 @@ fi
 cd "$repo_root"
 amazon_books_data="$GR_DATA_ROOT/amzn_books/sasrec_format.csv"
 amazon_books_sha256="b58804a08f835f0d85cb2d50628166670ee96c5808d622434ca57d2a48cdf491"
+kuairand_root="$GR_DATA_ROOT/kuairand-1k"
+kuairand_labels=(train eval item-map metadata checksums)
+declare -A kuairand_files=(
+  [train]="$kuairand_root/train.csv"
+  [eval]="$kuairand_root/eval.csv"
+  [item-map]="$kuairand_root/item_id_map.csv"
+  [metadata]="$kuairand_root/metadata.json"
+  [checksums]="$kuairand_root/checksums.sha256"
+)
+declare -A kuairand_sha256=(
+  [train]="65c162e9ecd04365edb7c3383a0a8055385b51d5999bc026665edd2746bf8eab"
+  [eval]="7b07610286a63817335c029024d0f8739db02ef10caeeacc1be258d2c2310b4f"
+  [item-map]="659b73eb21ed1625d465b99fc776010185def38f90264b77d9998386db58039a"
+  [metadata]="4ebaf6f172ab0577d9afa9e185a2a6f6a8becb7d0808ad184d933f978914c035"
+  [checksums]="d003096961e1df73a55508255a796c3845a83154c81a1f233167bcf76f2e01f7"
+)
 if [[ ! -f "$amazon_books_data" || -L "$amazon_books_data" ]]; then
   echo "Amazon Books data must be a regular file: $amazon_books_data" >&2
   exit 1
@@ -93,18 +109,35 @@ if [[ "$actual_amazon_books_sha256" != "$amazon_books_sha256" ]]; then
   echo "Amazon Books data checksum does not match the frozen experiment data" >&2
   exit 1
 fi
+for label in "${kuairand_labels[@]}"; do
+  expected_sha256="${kuairand_sha256[$label]}"
+  data_file="${kuairand_files[$label]}"
+  if [[ ! "$expected_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "KuaiRand-1K $label checksum is not frozen in the source snapshot" >&2
+    exit 1
+  fi
+  if [[ ! -f "$data_file" || -L "$data_file" ]]; then
+    echo "KuaiRand-1K $label data must be a regular file: $data_file" >&2
+    exit 1
+  fi
+  actual_sha256="$(sha256sum "$data_file" | cut -d' ' -f1)"
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    echo "KuaiRand-1K $label checksum does not match the frozen data" >&2
+    exit 1
+  fi
+done
 "$python_bin" -m unittest -v \
   generative_recommenders.research.modeling.sequential.safa_test
 "$python_bin" -m unittest discover -v -s scripts/tests -p "test_*.py"
 "$python_bin" -m unittest discover -v -s tests -p "test_*.py"
 "$python_bin" scripts/audit_safa_ab.py --dataset all
 
-datasets=(amzn-books ml-1m ml-20m)
+datasets=(amzn-books kuairand-1k ml-1m ml-20m)
 config_for() {
   local dataset="$1"
   local mode="$2"
   local num_negatives=128
-  if [[ "$dataset" == "amzn-books" ]]; then
+  if [[ "$dataset" == "amzn-books" || "$dataset" == "kuairand-1k" ]]; then
     num_negatives=512
   fi
   if [[ "$mode" == "hstu" ]]; then
@@ -185,7 +218,11 @@ umask 077
   echo "qualification_job_partition=$actual_partition"
   echo "qualification_restart_count=$actual_restart_count"
   echo "dataset_amzn-books_sha256=$amazon_books_sha256"
+  for label in "${kuairand_labels[@]}"; do
+    echo "dataset_kuairand-1k_${label}_sha256=${kuairand_sha256[$label]}"
+  done
   echo "experiment_config_amzn-books=${expected_config_identities[amzn-books]}"
+  echo "experiment_config_kuairand-1k=${expected_config_identities[kuairand-1k]}"
   echo "experiment_config_ml-1m=${expected_config_identities[ml-1m]}"
   echo "experiment_config_ml-20m=${expected_config_identities[ml-20m]}"
 } >"$temporary_marker"

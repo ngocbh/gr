@@ -6,18 +6,18 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 selection="${1:-all}"
 if (( $# > 1 )); then
-  echo "usage: $0 [all|amzn-books|ml-1m|ml-20m]" >&2
+  echo "usage: $0 [all|amzn-books|kuairand-1k|ml-1m|ml-20m]" >&2
   exit 2
 fi
 case "$selection" in
   all)
-    datasets=(amzn-books ml-1m ml-20m)
+    datasets=(amzn-books kuairand-1k ml-1m ml-20m)
     ;;
-  amzn-books|ml-1m|ml-20m)
+  amzn-books|kuairand-1k|ml-1m|ml-20m)
     datasets=("$selection")
     ;;
   *)
-    echo "usage: $0 [all|amzn-books|ml-1m|ml-20m]" >&2
+    echo "usage: $0 [all|amzn-books|kuairand-1k|ml-1m|ml-20m]" >&2
     exit 2
     ;;
 esac
@@ -71,6 +71,11 @@ for dataset in "${datasets[@]}"; do
       qos="h200_mrs_2_high"
       time_limit="3-00:00:00"
       job_name="safa-ab-amzn-books"
+      ;;
+    kuairand-1k)
+      qos="h200_mrs_2_high"
+      time_limit="3-00:00:00"
+      job_name="safa-ab-kuairand1k"
       ;;
     ml-1m)
       qos="h200_dev"

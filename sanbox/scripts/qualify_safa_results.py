@@ -29,7 +29,8 @@ Each run has the following shape::
     }
 
 Extra epochs are allowed, but the dataset's frozen full-evaluation epochs must be
-present exactly once. MovieLens uses epochs 96--100; Amazon Books uses epoch 200.
+present exactly once. MovieLens uses epochs 96--100, Amazon Books uses epoch 200,
+and KuaiRand-1K uses epoch 100.
 All provenance and inventory fields must agree across the six runs.
 The CLI independently verifies the six completed allocations with ``sacct``.
 """
@@ -62,6 +63,7 @@ EXPECTED_TASKS = (
 )
 FINAL_EPOCHS_BY_DATASET = {
     "amzn-books": (200,),
+    "kuairand-1k": (100,),
     "ml-1m": (96, 97, 98, 99, 100),
     "ml-20m": (96, 97, 98, 99, 100),
 }
@@ -73,6 +75,7 @@ HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
 POSITIVE_DECIMAL_ID = re.compile(r"[1-9][0-9]*")
 REQUIRED_QOS_BY_DATASET = {
     "amzn-books": "h200_mrs_2_high",
+    "kuairand-1k": "h200_mrs_2_high",
     "ml-1m": "h200_dev",
     "ml-20m": "h200_mrs_2_high",
 }
@@ -90,11 +93,13 @@ SCHEDULER_RECEIPT_KEYS = {
 }
 EXPECTED_PARAMETER_COUNTS = {
     "amzn-books": 44_866_592,
+    "kuairand-1k": 12_825_312,
     "ml-1m": 313_416,
     "ml-20m": 38_917_344,
 }
 EXPECTED_PARAMETER_INVENTORIES = {
     "amzn-books": "b70951a7c770dc52da5b9333ec30d86e2b84e7208a02e8824142685006c96de4",
+    "kuairand-1k": "e50dc8d5b5df6b383edce70d373ed1298f223c4c129107de106221640009c5de",
     "ml-1m": "2ca8f1559267c3a1741b2343092f2d2c55bcf2aff00265fa0dca8d628e6cf6c8",
     "ml-20m": "38636c03bbbbb842fd4a6fb81fa3f21e93ddf39d6509bb8d96bec42667c7f4d5",
 }

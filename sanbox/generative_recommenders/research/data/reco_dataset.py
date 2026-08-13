@@ -102,6 +102,31 @@ def get_reco_dataset(
             shift_id_by=1,  # [0..n-1] -> [1..n]
             chronological=chronological,
         )
+    elif dataset_name == "kuairand-1k":
+        dp = get_common_preprocessors()[dataset_name]
+        metadata = dp.load_metadata()
+        if max_sequence_length != metadata["max_sequence_length"]:
+            raise ValueError(
+                "kuairand-1k requires max_sequence_length="
+                f"{metadata['max_sequence_length']}, got {max_sequence_length}"
+            )
+        num_unique_items = int(metadata["statistics"]["num_items"])
+        train_dataset = DatasetV2(
+            ratings_file=dp.train_format_csv(),
+            padding_length=max_sequence_length + 1,
+            ignore_last_n=0,
+            shift_id_by=1,  # dense [0..n-1] -> model ids [1..n]
+            chronological=chronological,
+            sample_ratio=positional_sampling_ratio,
+        )
+        eval_dataset = DatasetV2(
+            ratings_file=dp.eval_format_csv(),
+            padding_length=max_sequence_length + 1,
+            ignore_last_n=0,
+            shift_id_by=1,
+            chronological=chronological,
+            sample_ratio=1.0,
+        )
     else:
         raise ValueError(f"Unknown dataset {dataset_name}")
 
@@ -158,18 +183,28 @@ def get_reco_dataset(
                     item_features.values[f][movie_id][j] = f_values[j]
             all_item_ids.append(movie_id)
         max_item_id = dp.expected_max_item_id()
+        num_unique_items = dp.expected_num_unique_items()
+        assert num_unique_items is not None
         for x in all_item_ids:
             assert x > 0, "x in all_item_ids should be positive"
+    elif dataset_name == "kuairand-1k":
+        # KuaiRand artifacts use dense zero-based IDs and DatasetV2 shifts them
+        # by one, reserving model ID zero for padding.
+        item_features = None
+        max_item_id = num_unique_items
+        all_item_ids = list(range(1, num_unique_items + 1))
     else:
-        # expected_max_item_id and item_features are not set for Amazon datasets.
+        # expected_max_item_id and item_features are not set for Amazon/synthetic data.
         # pyrefly: ignore [bad-assignment]
         item_features = None
         max_item_id = dp.expected_num_unique_items()
+        num_unique_items = dp.expected_num_unique_items()
+        assert num_unique_items is not None
         all_item_ids = [x + 1 for x in range(max_item_id)]  # pyre-ignore [6]
 
     return RecoDataset(
         max_sequence_length=max_sequence_length,
-        num_unique_items=dp.expected_num_unique_items(),  # pyre-ignore [6]
+        num_unique_items=num_unique_items,
         max_item_id=max_item_id,  # pyre-ignore [6]
         all_item_ids=all_item_ids,
         train_dataset=train_dataset,

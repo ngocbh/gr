@@ -16,7 +16,7 @@ set -euo pipefail
 : "${GR_CODE_SNAPSHOT:?missing immutable source snapshot path}"
 repo_root="$(realpath -e "$GR_CODE_SNAPSHOT")"
 : "${GR_EXPECTED_SOURCE_MANIFEST:?missing pinned snapshot manifest}"
-: "${GR_DATASET:?GR_DATASET must be amzn-books, ml-1m, or ml-20m}"
+: "${GR_DATASET:?GR_DATASET must be amzn-books, kuairand-1k, ml-1m, or ml-20m}"
 : "${GR_DATA_ROOT:?GR_DATA_ROOT must be set}"
 : "${GR_EXPS_ROOT:?GR_EXPS_ROOT must be set}"
 : "${GR_CKPTS_ROOT:?GR_CKPTS_ROOT must be set}"
@@ -81,12 +81,24 @@ if [[ -n "$reported_restart_count" ]]; then
     exit 1
   fi
 fi
+kuairand_labels=(train eval item-map metadata checksums)
+declare -A kuairand_sha256=(
+  [train]="65c162e9ecd04365edb7c3383a0a8055385b51d5999bc026665edd2746bf8eab"
+  [eval]="7b07610286a63817335c029024d0f8739db02ef10caeeacc1be258d2c2310b4f"
+  [item-map]="659b73eb21ed1625d465b99fc776010185def38f90264b77d9998386db58039a"
+  [metadata]="4ebaf6f172ab0577d9afa9e185a2a6f6a8becb7d0808ad184d933f978914c035"
+  [checksums]="d003096961e1df73a55508255a796c3845a83154c81a1f233167bcf76f2e01f7"
+)
 case "$GR_DATASET" in
   amzn-books)
     required_qos="h200_mrs_2_high"
     num_negatives=512
     dataset_file="$GR_DATA_ROOT/amzn_books/sasrec_format.csv"
     dataset_sha256="b58804a08f835f0d85cb2d50628166670ee96c5808d622434ca57d2a48cdf491"
+    ;;
+  kuairand-1k)
+    required_qos="h200_mrs_2_high"
+    num_negatives=512
     ;;
   ml-1m)
     required_qos="h200_dev"
@@ -110,15 +122,45 @@ if [[ "$actual_partition" != "h200" ]]; then
   exit 1
 fi
 if [[ "$GR_DATASET" == "amzn-books" ]]; then
+  if [[ ! "$dataset_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "$GR_DATASET data checksum is not frozen in the source snapshot" >&2
+    exit 1
+  fi
   if [[ ! -f "$dataset_file" || -L "$dataset_file" ]]; then
-    echo "Amazon Books data must be a regular file: $dataset_file" >&2
+    echo "$GR_DATASET data must be a regular file: $dataset_file" >&2
     exit 1
   fi
   actual_dataset_sha256="$(sha256sum "$dataset_file" | cut -d' ' -f1)"
   if [[ "$actual_dataset_sha256" != "$dataset_sha256" ]]; then
-    echo "Amazon Books data checksum does not match the frozen experiment data" >&2
+    echo "$GR_DATASET data checksum does not match the frozen experiment data" >&2
     exit 1
   fi
+fi
+if [[ "$GR_DATASET" == "kuairand-1k" ]]; then
+  declare -A kuairand_files=(
+    [train]="$GR_DATA_ROOT/kuairand-1k/train.csv"
+    [eval]="$GR_DATA_ROOT/kuairand-1k/eval.csv"
+    [item-map]="$GR_DATA_ROOT/kuairand-1k/item_id_map.csv"
+    [metadata]="$GR_DATA_ROOT/kuairand-1k/metadata.json"
+    [checksums]="$GR_DATA_ROOT/kuairand-1k/checksums.sha256"
+  )
+  for label in "${kuairand_labels[@]}"; do
+    expected_sha256="${kuairand_sha256[$label]}"
+    data_file="${kuairand_files[$label]}"
+    if [[ ! "$expected_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+      echo "KuaiRand-1K $label checksum is not frozen in the source snapshot" >&2
+      exit 1
+    fi
+    if [[ ! -f "$data_file" || -L "$data_file" ]]; then
+      echo "KuaiRand-1K $label data must be a regular file: $data_file" >&2
+      exit 1
+    fi
+    actual_sha256="$(sha256sum "$data_file" | cut -d' ' -f1)"
+    if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+      echo "KuaiRand-1K $label checksum does not match the frozen data" >&2
+      exit 1
+    fi
+  done
 fi
 export SLURM_JOB_QOS="$actual_qos"
 export SLURM_JOB_PARTITION="$actual_partition"
@@ -138,14 +180,21 @@ if ! grep -Fxq "source_manifest=$GR_SOURCE_MANIFEST" "$qualification_marker"; th
   echo "qualification marker does not match this snapshot" >&2
   exit 1
 fi
-for expected_line in \
+expected_marker_lines=(
   "status=passed" \
   "qualification_scope=preflight_only" \
   "source_commit=$GR_SOURCE_COMMIT" \
   "source_tree=$GR_SOURCE_TREE" \
   "qualification_job_qos=h200_dev" \
   "qualification_job_partition=h200" \
-  "dataset_amzn-books_sha256=b58804a08f835f0d85cb2d50628166670ee96c5808d622434ca57d2a48cdf491"; do
+  "dataset_amzn-books_sha256=b58804a08f835f0d85cb2d50628166670ee96c5808d622434ca57d2a48cdf491"
+)
+for label in "${kuairand_labels[@]}"; do
+  expected_marker_lines+=(
+    "dataset_kuairand-1k_${label}_sha256=${kuairand_sha256[$label]}"
+  )
+done
+for expected_line in "${expected_marker_lines[@]}"; do
   if ! grep -Fxq "$expected_line" "$qualification_marker"; then
     echo "qualification marker is incomplete: $expected_line" >&2
     exit 1

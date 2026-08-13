@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import inspect
 import json
 import sys
@@ -61,6 +62,7 @@ class PairSpec:
     expected_backbone_parameters: int
     expected_forget_parameters: int
     expected_total_parameters: int
+    expected_inventory_sha256: str
 
 
 PAIR_SPECS: Mapping[str, PairSpec] = {
@@ -76,6 +78,25 @@ PAIR_SPECS: Mapping[str, PairSpec] = {
         expected_backbone_parameters=44_865_440,
         expected_forget_parameters=1_152,
         expected_total_parameters=44_866_592,
+        expected_inventory_sha256=(
+            "b70951a7c770dc52da5b9333ec30d86e2b84e7208a02e8824142685006c96de4"
+        ),
+    ),
+    "kuairand-1k": PairSpec(
+        dataset="kuairand-1k",
+        max_item_id=192_120,
+        upstream_config=REPO_ROOT
+        / "configs/kuairand-1k/hstu-sampled-softmax-n512-large-final.gin",
+        hstu_config=REPO_ROOT
+        / "configs/kuairand-1k/hstu-matched-sampled-softmax-n512-large-final.gin",
+        safa_config=REPO_ROOT
+        / "configs/kuairand-1k/safa-sampled-softmax-n512-large-final.gin",
+        expected_backbone_parameters=12_824_160,
+        expected_forget_parameters=1_152,
+        expected_total_parameters=12_825_312,
+        expected_inventory_sha256=(
+            "e50dc8d5b5df6b383edce70d373ed1298f223c4c129107de106221640009c5de"
+        ),
     ),
     "ml-1m": PairSpec(
         dataset="ml-1m",
@@ -89,6 +110,9 @@ PAIR_SPECS: Mapping[str, PairSpec] = {
         expected_backbone_parameters=313_000,
         expected_forget_parameters=416,
         expected_total_parameters=313_416,
+        expected_inventory_sha256=(
+            "2ca8f1559267c3a1741b2343092f2d2c55bcf2aff00265fa0dca8d628e6cf6c8"
+        ),
     ),
     "ml-20m": PairSpec(
         dataset="ml-20m",
@@ -102,6 +126,9 @@ PAIR_SPECS: Mapping[str, PairSpec] = {
         expected_backbone_parameters=38_913_120,
         expected_forget_parameters=4_224,
         expected_total_parameters=38_917_344,
+        expected_inventory_sha256=(
+            "38636c03bbbbb842fd4a6fb81fa3f21e93ddf39d6509bb8d96bec42667c7f4d5"
+        ),
     ),
 }
 
@@ -268,19 +295,33 @@ def parameter_signature(model: torch.nn.Module) -> ParameterSignature:
     }
 
 
-def _inventory(config_path: Path, max_item_id: int) -> ParameterSignature:
+def parameter_inventory_sha256(model: torch.nn.Module) -> str:
+    inventory = "\n".join(
+        f"{name}\t{tuple(parameter.shape)}\t{parameter.dtype}\t"
+        f"{parameter.requires_grad}"
+        for name, parameter in sorted(model.named_parameters())
+    )
+    return hashlib.sha256(inventory.encode("utf-8")).hexdigest()
+
+
+def _inventory(config_path: Path, max_item_id: int) -> Tuple[ParameterSignature, str]:
     model = build_model(config_path=config_path, max_item_id=max_item_id)
     signature = parameter_signature(model)
+    inventory_sha256 = parameter_inventory_sha256(model)
     del model
     gc.collect()
-    return signature
+    return signature, inventory_sha256
 
 
 def audit_pair(spec: PairSpec) -> Dict[str, int | str]:
     assert_config_pair(spec)
     assert_upstream_fidelity(spec)
-    hstu_signature = _inventory(spec.hstu_config, spec.max_item_id)
-    safa_signature = _inventory(spec.safa_config, spec.max_item_id)
+    hstu_signature, hstu_inventory_sha256 = _inventory(
+        spec.hstu_config, spec.max_item_id
+    )
+    safa_signature, safa_inventory_sha256 = _inventory(
+        spec.safa_config, spec.max_item_id
+    )
 
     if hstu_signature != safa_signature:
         differing_names = sorted(
@@ -290,6 +331,16 @@ def audit_pair(spec: PairSpec) -> Dict[str, int | str]:
         )
         raise AssertionError(
             f"{spec.dataset}: parameter names/shapes differ: {differing_names}"
+        )
+    actual_inventory_sha256 = (hstu_inventory_sha256, safa_inventory_sha256)
+    expected_inventory_sha256 = (
+        spec.expected_inventory_sha256,
+        spec.expected_inventory_sha256,
+    )
+    if actual_inventory_sha256 != expected_inventory_sha256:
+        raise AssertionError(
+            f"{spec.dataset}: parameter inventory SHA-256 mismatch; "
+            f"expected {expected_inventory_sha256}, found {actual_inventory_sha256}"
         )
 
     total_parameters = sum(entry[2] for entry in hstu_signature.values())
@@ -325,6 +376,7 @@ def audit_pair(spec: PairSpec) -> Dict[str, int | str]:
         "forget_parameters": forget_parameters,
         "total_parameters": total_parameters,
         "trainable_parameters": trainable_parameters,
+        "parameter_inventory_sha256": hstu_inventory_sha256,
     }
 
 

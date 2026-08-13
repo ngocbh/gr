@@ -147,6 +147,7 @@ def _slurm_provenance(
         raise ValueError("slurm_array_task_id must be an integer in [0, 5]")
     required_qos = {
         "amzn-books": "h200_mrs_2_high",
+        "kuairand-1k": "h200_mrs_2_high",
         "ml-1m": "h200_dev",
         "ml-20m": "h200_mrs_2_high",
     }.get(dataset_name)

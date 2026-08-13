@@ -42,6 +42,17 @@ class EvalState:
     top_k_module: TopKModule
 
 
+def _seen_ids_excluding_target(
+    past_ids: torch.Tensor, target_ids: torch.Tensor
+) -> torch.Tensor:
+    """Filter seen items without making a repeated ground-truth item unrankable."""
+    if target_ids.dim() != 2 or target_ids.size(1) != 1:
+        raise ValueError("target_ids must have shape [B, 1]")
+    if past_ids.size(0) != target_ids.size(0):
+        raise ValueError("past_ids and target_ids must have the same batch size")
+    return torch.where(past_ids == target_ids, torch.zeros_like(past_ids), past_ids)
+
+
 def get_eval_state(
     model: SimilarityModule,
     all_item_ids: List[int],  # [X]
@@ -86,11 +97,11 @@ def eval_metrics_v2_from_tensors(
     """
     Args:
         eval_negatives_ids: Optional[Tensor]. If not present, defaults to eval over
-            the entire corpus (`num_items`) excluding all the items that users have
-            seen in the past (historical_ids, target_ids). This is consistent with
-            papers like SASRec and TDM but may not be fair in practice as retrieval
-            modules don't have access to read state during the initial fetch stage.
-        filter_invalid_ids: bool. If true, filters seen ids by default.
+        the entire corpus (`num_items`) excluding historical items other than
+        the evaluation target. This is consistent with papers like SASRec and
+        TDM but may not be fair in practice as retrieval modules don't have
+        access to read state during the initial fetch stage.
+        filter_invalid_ids: bool. If true, filters seen non-target ids by default.
     Returns:
         keyed metric -> list of values for each example.
     """
@@ -123,20 +134,20 @@ def eval_metrics_v2_from_tensors(
     eval_top_k_ids_all = []
     eval_top_k_prs_all = []
     for mb in range(num_batches):
+        batch_start = mb * user_max_batch_size
+        batch_end = (mb + 1) * user_max_batch_size
+        invalid_ids = None
+        if filter_invalid_ids:
+            invalid_ids = _seen_ids_excluding_target(
+                seq_features.past_ids[batch_start:batch_end, :],
+                target_ids[batch_start:batch_end, :],
+            )
         eval_top_k_ids, eval_top_k_prs, _ = (
             eval_state.candidate_index.get_top_k_outputs(
-                query_embeddings=shared_input_embeddings[
-                    mb * user_max_batch_size : (mb + 1) * user_max_batch_size, ...
-                ],
+                query_embeddings=shared_input_embeddings[batch_start:batch_end, ...],
                 top_k_module=eval_state.top_k_module,
                 k=k,
-                invalid_ids=(
-                    seq_features.past_ids[
-                        mb * user_max_batch_size : (mb + 1) * user_max_batch_size, :
-                    ]
-                    if filter_invalid_ids
-                    else None
-                ),
+                invalid_ids=invalid_ids,
                 return_embeddings=False,
             )
         )

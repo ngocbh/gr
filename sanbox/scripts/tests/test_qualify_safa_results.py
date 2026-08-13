@@ -106,7 +106,12 @@ def _document(deltas=None):
 def _document_for_dataset(dataset, deltas=None):
     document = _document(deltas)
     qos = "h200_dev" if dataset == "ml-1m" else "h200_mrs_2_high"
-    epochs = (200,) if dataset == "amzn-books" else tuple(range(96, 101))
+    epochs = {
+        "amzn-books": (200,),
+        "kuairand-1k": (100,),
+        "ml-1m": tuple(range(96, 101)),
+        "ml-20m": tuple(range(96, 101)),
+    }[dataset]
     for run in document["runs"]:
         value = run["epochs"][0]["value"]
         run["dataset"] = dataset
@@ -310,6 +315,40 @@ class ThresholdTest(unittest.TestCase):
             qualify_results(
                 document,
                 expected_dataset="amzn-books",
+                expected_source_commit=COMMIT,
+                expected_source_tree=TREE,
+                expected_source_manifest=MANIFEST,
+                expected_experiment_config_sha256=EXPECTED_EXPERIMENT_CONFIG_SHA256,
+                expected_array_job_id=ARRAY_JOB_ID,
+                scheduler_receipt=receipt,
+            )
+
+    def test_kuairand_uses_epoch_100_and_high_qos(self) -> None:
+        document = _document_for_dataset("kuairand-1k")
+        receipt = _scheduler_receipt(
+            expected_qos="h200_mrs_2_high",
+            qos={task_id: "h200_mrs_2_high" for task_id in range(6)},
+        )
+        summary = qualify_results(
+            document,
+            expected_dataset="kuairand-1k",
+            expected_source_commit=COMMIT,
+            expected_source_tree=TREE,
+            expected_source_manifest=MANIFEST,
+            expected_experiment_config_sha256=EXPECTED_EXPERIMENT_CONFIG_SHA256,
+            expected_array_job_id=ARRAY_JOB_ID,
+            scheduler_receipt=receipt,
+        )
+        self.assertTrue(summary["passed"])
+        self.assertEqual(summary["final_epochs"], [100])
+
+        document["runs"][0]["epochs"] = [
+            {"epoch": epoch, "value": 0.5} for epoch in range(96, 100)
+        ]
+        with self.assertRaisesRegex(ResultsError, "missing final epochs"):
+            qualify_results(
+                document,
+                expected_dataset="kuairand-1k",
                 expected_source_commit=COMMIT,
                 expected_source_tree=TREE,
                 expected_source_manifest=MANIFEST,

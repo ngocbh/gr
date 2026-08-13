@@ -14,8 +14,10 @@
 
 # pyre-unsafe
 
+import ast
 import csv
 import linecache
+import math
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -68,9 +70,30 @@ class DatasetV2(torch.utils.data.Dataset):
     def load_item(self, data) -> Dict[str, torch.Tensor]:
         user_id = data.user_id
 
+        def as_integer(value: object) -> int:
+            if isinstance(value, bool):
+                raise ValueError("serialized sequences must not contain booleans")
+            if isinstance(value, (int, np.integer)):
+                return int(value)
+            if isinstance(value, (float, np.floating)):
+                numeric_value = float(value)
+                if math.isfinite(numeric_value):
+                    return int(numeric_value)
+            raise ValueError("serialized sequences must contain only finite numbers")
+
         def eval_as_list(x: str, ignore_last_n: int) -> List[int]:
-            y = eval(x)
-            y_list = [y] if type(y) == int else list(y)
+            if isinstance(x, str):
+                y = ast.literal_eval(x)
+            elif isinstance(x, (int, float, np.integer, np.floating)):
+                y = x
+            else:
+                raise ValueError(f"unsupported serialized sequence value: {type(x)}")
+            if isinstance(y, (int, float, np.integer, np.floating)):
+                y_list = [as_integer(y)]
+            elif isinstance(y, (list, tuple)):
+                y_list = [as_integer(value) for value in y]
+            else:
+                raise ValueError("serialized sequence must be a number, list, or tuple")
             if ignore_last_n > 0:
                 # for training data creation
                 y_list = y_list[:-ignore_last_n]
@@ -121,12 +144,12 @@ class DatasetV2(torch.utils.data.Dataset):
             0,
             sampling_kept_mask=sampling_kept_mask,
         )
-        assert movie_history_len == timestamps_len, (
-            f"history len {movie_history_len} differs from timestamp len {timestamps_len}."
-        )
-        assert movie_history_len == ratings_len, (
-            f"history len {movie_history_len} differs from ratings len {ratings_len}."
-        )
+        assert (
+            movie_history_len == timestamps_len
+        ), f"history len {movie_history_len} differs from timestamp len {timestamps_len}."
+        assert (
+            movie_history_len == ratings_len
+        ), f"history len {movie_history_len} differs from ratings len {ratings_len}."
 
         def _truncate_or_pad_seq(
             y: List[int], target_len: int, chronological: bool

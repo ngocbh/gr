@@ -237,6 +237,33 @@ class SlurmProvenanceTest(unittest.TestCase):
                     dataset_name="amzn-books",
                 )
 
+    def test_kuairand_requires_high_qos(self) -> None:
+        environment = {
+            "GR_REQUIRE_SLURM_PROVENANCE": "1",
+            "SLURM_ARRAY_JOB_ID": "123456",
+            "SLURM_ARRAY_TASK_ID": "0",
+            "SLURM_JOB_ID": "123456",
+            "SLURM_JOB_QOS": "h200_mrs_2_high",
+            "SLURM_RESTART_COUNT": "0",
+            "SLURM_JOB_PARTITION": "h200",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            provenance = _slurm_provenance(
+                attention_mode="hstu",
+                random_seed=42,
+                dataset_name="kuairand-1k",
+            )
+        self.assertEqual(provenance["slurm_job_qos"], "h200_mrs_2_high")
+
+        environment["SLURM_JOB_QOS"] = "h200_dev"
+        with mock.patch.dict(os.environ, environment, clear=True):
+            with self.assertRaisesRegex(ValueError, "h200_mrs_2_high"):
+                _slurm_provenance(
+                    attention_mode="hstu",
+                    random_seed=42,
+                    dataset_name="kuairand-1k",
+                )
+
     def test_scheduler_provenance_is_optional_outside_full_arrays(self) -> None:
         with mock.patch.dict(
             os.environ,
@@ -371,8 +398,7 @@ class SlurmContractTest(unittest.TestCase):
         self.assertIn("SLURM_ARRAY_TASK_ID / 2", wrapper)
         self.assertIn("SLURM_ARRAY_TASK_ID % 2", wrapper)
         self.assertIn(
-            'amzn-books)\n    required_qos="h200_mrs_2_high"\n'
-            "    num_negatives=512",
+            'amzn-books)\n    required_qos="h200_mrs_2_high"\n' "    num_negatives=512",
             wrapper,
         )
         self.assertIn(
@@ -380,8 +406,12 @@ class SlurmContractTest(unittest.TestCase):
             wrapper,
         )
         self.assertIn(
-            'ml-20m)\n    required_qos="h200_mrs_2_high"\n'
-            "    num_negatives=128",
+            'kuairand-1k)\n    required_qos="h200_mrs_2_high"\n'
+            "    num_negatives=512",
+            wrapper,
+        )
+        self.assertIn(
+            'ml-20m)\n    required_qos="h200_mrs_2_high"\n' "    num_negatives=128",
             wrapper,
         )
         self.assertIn("GR_EXPECTED_EXPERIMENT_CONFIG_SHA256", wrapper)
@@ -396,6 +426,7 @@ class SlurmContractTest(unittest.TestCase):
         qualifier = (REPO_ROOT / "scripts/qualify_safa.sh").read_text(encoding="utf-8")
         self.assertIn("GR_CONFIG_IDENTITY_ONLY=1", qualifier)
         self.assertIn("experiment_config_amzn-books=", qualifier)
+        self.assertIn("experiment_config_kuairand-1k=", qualifier)
         self.assertIn("experiment_config_ml-1m=", qualifier)
         self.assertIn("experiment_config_ml-20m=", qualifier)
         self.assertIn("unset WANDB_MODE WANDB_DISABLED", qualifier)
@@ -410,14 +441,15 @@ class SlurmContractTest(unittest.TestCase):
         submitter = (REPO_ROOT / "scripts/submit_safa_ab.sh").read_text(
             encoding="utf-8"
         )
-        self.assertIn("datasets=(amzn-books ml-1m ml-20m)", submitter)
-        self.assertIn("amzn-books|ml-1m|ml-20m)", submitter)
+        self.assertIn("datasets=(amzn-books kuairand-1k ml-1m ml-20m)", submitter)
+        self.assertIn("amzn-books|kuairand-1k|ml-1m|ml-20m)", submitter)
         self.assertEqual(submitter.count('dependency="afterok:$qualification_job"'), 1)
         self.assertIn("GR_DATASET=$dataset", submitter)
         self.assertIn('qos="h200_mrs_2_high"', submitter)
         self.assertIn('time_limit="3-00:00:00"', submitter)
-        self.assertIn("--job-name=\"$job_name\"", submitter)
+        self.assertIn('--job-name="$job_name"', submitter)
         self.assertIn('job_name="safa-ab-amzn-books"', submitter)
+        self.assertIn('job_name="safa-ab-kuairand1k"', submitter)
         self.assertIn('job_name="safa-ab-ml1m"', submitter)
         self.assertIn('job_name="safa-ab-ml20m"', submitter)
         self.assertIn('echo "postrun_${label}=', submitter)
@@ -495,7 +527,18 @@ class SlurmContractTest(unittest.TestCase):
                         "qualification_restart_count=0",
                         "dataset_amzn-books_sha256="
                         "b58804a08f835f0d85cb2d50628166670ee96c5808d622434ca57d2a48cdf491",
+                        "dataset_kuairand-1k_train_sha256="
+                        "65c162e9ecd04365edb7c3383a0a8055385b51d5999bc026665edd2746bf8eab",
+                        "dataset_kuairand-1k_eval_sha256="
+                        "7b07610286a63817335c029024d0f8739db02ef10caeeacc1be258d2c2310b4f",
+                        "dataset_kuairand-1k_item-map_sha256="
+                        "659b73eb21ed1625d465b99fc776010185def38f90264b77d9998386db58039a",
+                        "dataset_kuairand-1k_metadata_sha256="
+                        "4ebaf6f172ab0577d9afa9e185a2a6f6a8becb7d0808ad184d933f978914c035",
+                        "dataset_kuairand-1k_checksums_sha256="
+                        "d003096961e1df73a55508255a796c3845a83154c81a1f233167bcf76f2e01f7",
                         f"experiment_config_amzn-books={'c' * 64}",
+                        f"experiment_config_kuairand-1k={'f' * 64}",
                         f"experiment_config_ml-1m={'d' * 64}",
                         f"experiment_config_ml-20m={'e' * 64}",
                     )
@@ -751,6 +794,73 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
             self.assertEqual(
                 amazon["wandb_tags"],
                 "safa-ab,amzn-books,safa,seed-44,parameter-matched",
+            )
+
+            kuairand_data = temporary_root / "data/kuairand-1k"
+            kuairand_data.mkdir(parents=True)
+            for filename in (
+                "train.csv",
+                "eval.csv",
+                "item_id_map.csv",
+                "metadata.json",
+                "checksums.sha256",
+            ):
+                (kuairand_data / filename).write_text(
+                    f"frozen {filename} fixture\n", encoding="utf-8"
+                )
+            fake_sha256sum.write_text(
+                """#!/usr/bin/env bash
+case "$1" in
+  */train.csv)
+    digest=65c162e9ecd04365edb7c3383a0a8055385b51d5999bc026665edd2746bf8eab ;;
+  */eval.csv)
+    digest=7b07610286a63817335c029024d0f8739db02ef10caeeacc1be258d2c2310b4f ;;
+  */item_id_map.csv)
+    digest=659b73eb21ed1625d465b99fc776010185def38f90264b77d9998386db58039a ;;
+  */metadata.json)
+    digest=4ebaf6f172ab0577d9afa9e185a2a6f6a8becb7d0808ad184d933f978914c035 ;;
+  */checksums.sha256)
+    digest=d003096961e1df73a55508255a796c3845a83154c81a1f233167bcf76f2e01f7 ;;
+  *)
+    exit 2 ;;
+esac
+printf '%s  %s\n' "$digest" "$1"
+""",
+                encoding="utf-8",
+            )
+            fake_sha256sum.chmod(0o755)
+            kuairand_capture = temporary_root / "capture-kuairand.json"
+            kuairand_environment = {
+                **high_environment,
+                "CAPTURE_PATH": str(kuairand_capture),
+                "GR_DATASET": "kuairand-1k",
+            }
+            subprocess.run(
+                ["/bin/bash", str(spooled_wrapper)],
+                check=True,
+                env=kuairand_environment,
+                capture_output=True,
+                text=True,
+            )
+            kuairand = json.loads(kuairand_capture.read_text(encoding="utf-8"))
+            self.assertEqual(kuairand["slurm_job_qos"], "h200_mrs_2_high")
+            self.assertTrue(
+                kuairand["argv"][2].endswith(
+                    "configs/kuairand-1k/safa-sampled-softmax-n512-large-final.gin"
+                )
+            )
+            self.assertEqual(kuairand["expected_experiment_config"], "f" * 64)
+            self.assertEqual(
+                kuairand["experiment_name"],
+                "safa-ab-kuairand-1k-safa-seed44-999-r0",
+            )
+            self.assertEqual(
+                kuairand["wandb_group"],
+                f"safa-ab-kuairand-1k-{provenance['source_manifest'][:12]}",
+            )
+            self.assertEqual(
+                kuairand["wandb_tags"],
+                "safa-ab,kuairand-1k,safa,seed-44,parameter-matched",
             )
 
 

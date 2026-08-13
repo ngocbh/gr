@@ -84,6 +84,7 @@ The number of gate parameters is
 | Dataset | HSTU backbone | Gate parameters | Total in each arm |
 | --- | ---: | ---: | ---: |
 | Amazon Books | 44,865,440 | 1,152 | 44,866,592 |
+| KuaiRand-1K | 12,824,160 | 1,152 | 12,825,312 |
 | MovieLens-1M | 313,000 | 416 | 313,416 |
 | MovieLens-20M | 38,913,120 | 4,224 | 38,917,344 |
 
@@ -91,6 +92,71 @@ For each dataset, the paired Gin files differ only in
 `hstu_encoder.attention_mode = "hstu" | "safa"`. Use
 `hstu-matched-...gin` as the canonical control: it binds the arm explicitly and
 is the file paired with SAFA by the audit and provenance workflow.
+
+## Prepare KuaiRand-1K
+
+Use the sequence-complete KuaiRand-1K release for the research benchmark. The
+dataset authors explicitly caution that KuaiRand-Pure removes interactions
+outside its candidate pool and therefore does not preserve rigorous user
+histories. The official archive is hosted in the
+[Zenodo record](https://zenodo.org/records/10439422):
+
+- archive:
+  [`KuaiRand-1K.tar.gz`](https://zenodo.org/records/10439422/files/KuaiRand-1K.tar.gz);
+- MD5: `6b0b9c8222d67fcd4c676218edca3f1f`; and
+- paper and field definitions: [kuairand.com](https://kuairand.com/).
+
+From the `sanbox/` root, download, verify, and prepare the research files with:
+
+```bash
+GR_DATA_ROOT=/path/to/data \
+  python3 preprocess_public_data.py --dataset kuairand-1k
+```
+
+The command downloads the official Zenodo archive when it is absent and
+verifies its MD5 before extraction. To reuse an existing archive without
+another download, provide its absolute path:
+
+```bash
+GR_DATA_ROOT=/path/to/data \
+GR_KUAIRAND_ARCHIVE=/existing/KuaiRand-1K.tar.gz \
+  python3 preprocess_public_data.py --dataset kuairand-1k
+```
+
+The preparation protocol is fixed as follows:
+
+1. Merge both standard logs and the random-intervention log, ordered stably by
+   `(user_id, time_ms, source_file_rank, source_row)`.
+2. Retain implicit positives with `is_click == 1` and `is_hate == 0`, then
+   apply iterative 5-core filtering to users and items.
+3. Remap sorted original video IDs to dense zero-based IDs. The data loader
+   shifts them by one so ID zero remains reserved for padding.
+4. Hold out each user's final retained event as the single evaluation target.
+   Split the preceding training prefix into rows of at most 2,049 events,
+   starting at offsets `0, 2048, 4096, ...`; neighboring rows share only their
+   boundary event so every next-item transition is supervised once.
+5. Keep the final at-most-2,049-event row, including the held-out target, for
+   leave-last-out evaluation. HSTU and SAFA both use a maximum history length
+   of 2,048.
+
+Prepared files are written under `$GR_DATA_ROOT/kuairand-1k/` as `train.csv`,
+`eval.csv`, `item_id_map.csv`, `metadata.json`, and `checksums.sha256`. Keep
+these generated files out of source control; the metadata and checksums define
+the exact processed dataset used by a run. The metadata records the protocol
+version, preprocessor source hash, and Python/NumPy/pandas versions; loading
+fails closed on schema, official source/statistic, or artifact-manifest drift.
+
+This is a next-positive-item benchmark over logged exposure sequences. It does
+**not** implement unbiased or off-policy evaluation over KuaiRand's uniformly
+randomized candidate pool, so HSTU/SAFA results from this protocol must not be
+described as unbiased evaluation.
+
+The official sources currently disagree on licensing: the Zenodo record labels
+the archive CC BY 4.0, while the
+[official repository](https://github.com/chongminggao/KuaiRand/blob/main/LICENSE)
+states CC BY-SA 4.0. Cite Gao et al., do not redistribute raw or prepared data,
+and treat derived artifacts under the stricter CC BY-SA terms unless the
+dataset maintainers clarify the discrepancy.
 
 ## Run the two arms
 
@@ -108,8 +174,10 @@ bash scripts/train.sh \
   --gin_bindings=train_fn.random_seed=42
 ```
 
-Equivalent paired configs exist under `configs/ml-20m/`. Amazon Books uses
-the `n512` pair under `configs/amzn-books/`.
+Equivalent paired configs exist under `configs/ml-20m/`. Amazon Books and
+KuaiRand-1K use the `n512` pairs under `configs/amzn-books/` and
+`configs/kuairand-1k/`, respectively; `n512` denotes 512 sampled negatives,
+not the sequence length.
 
 The controlled cluster workflow creates an immutable source snapshot, runs
 preflight equivalence and smoke checks, then submits paired HSTU/SAFA arrays
@@ -121,8 +189,8 @@ submit_task=$(pueue add -p -w "$PWD" \
 pueue log "$submit_task" --full
 ```
 
-The optional selector is `amzn-books`, `ml-1m`, `ml-20m`, or `all`; omitting
-it submits all three datasets after one shared preflight.
+The optional selector is `amzn-books`, `kuairand-1k`, `ml-1m`, `ml-20m`, or
+`all`; omitting it submits all four datasets after one shared preflight.
 
 Commit all intended `sanbox/` source changes first; snapshot creation refuses a
 dirty source tree. Set `GR_DATA_ROOT`, `GR_EXPS_ROOT`, and `GR_CKPTS_ROOT`, and
