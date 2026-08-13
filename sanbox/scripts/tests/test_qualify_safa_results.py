@@ -103,6 +103,20 @@ def _document(deltas=None):
     return {"schema_version": 3, "runs": runs}
 
 
+def _document_for_dataset(dataset, deltas=None):
+    document = _document(deltas)
+    qos = "h200_dev" if dataset == "ml-1m" else "h200_mrs_2_high"
+    epochs = (200,) if dataset == "amzn-books" else tuple(range(96, 101))
+    for run in document["runs"]:
+        value = run["epochs"][0]["value"]
+        run["dataset"] = dataset
+        run["parameter_count"] = EXPECTED_PARAMETER_COUNTS[dataset]
+        run["parameter_inventory_sha256"] = EXPECTED_PARAMETER_INVENTORIES[dataset]
+        run["slurm_job_qos"] = qos
+        run["epochs"] = [{"epoch": epoch, "value": value} for epoch in epochs]
+    return document
+
+
 def _sacct_output(
     *,
     states=None,
@@ -253,12 +267,7 @@ class SacctReceiptTest(unittest.TestCase):
 
 class ThresholdTest(unittest.TestCase):
     def test_ml20_high_qos_passes_provenance_gate(self) -> None:
-        document = _document()
-        for run in document["runs"]:
-            run["dataset"] = "ml-20m"
-            run["parameter_count"] = EXPECTED_PARAMETER_COUNTS["ml-20m"]
-            run["parameter_inventory_sha256"] = EXPECTED_PARAMETER_INVENTORIES["ml-20m"]
-            run["slurm_job_qos"] = "h200_mrs_2_high"
+        document = _document_for_dataset("ml-20m")
         receipt = _scheduler_receipt(
             expected_qos="h200_mrs_2_high",
             qos={task_id: "h200_mrs_2_high" for task_id in range(6)},
@@ -274,6 +283,40 @@ class ThresholdTest(unittest.TestCase):
             scheduler_receipt=receipt,
         )
         self.assertTrue(summary["passed"])
+
+    def test_amazon_uses_epoch_200_and_high_qos(self) -> None:
+        document = _document_for_dataset("amzn-books")
+        receipt = _scheduler_receipt(
+            expected_qos="h200_mrs_2_high",
+            qos={task_id: "h200_mrs_2_high" for task_id in range(6)},
+        )
+        summary = qualify_results(
+            document,
+            expected_dataset="amzn-books",
+            expected_source_commit=COMMIT,
+            expected_source_tree=TREE,
+            expected_source_manifest=MANIFEST,
+            expected_experiment_config_sha256=EXPECTED_EXPERIMENT_CONFIG_SHA256,
+            expected_array_job_id=ARRAY_JOB_ID,
+            scheduler_receipt=receipt,
+        )
+        self.assertTrue(summary["passed"])
+        self.assertEqual(summary["final_epochs"], [200])
+
+        document["runs"][0]["epochs"] = [
+            {"epoch": epoch, "value": 0.5} for epoch in range(96, 101)
+        ]
+        with self.assertRaisesRegex(ResultsError, "missing final epochs"):
+            qualify_results(
+                document,
+                expected_dataset="amzn-books",
+                expected_source_commit=COMMIT,
+                expected_source_tree=TREE,
+                expected_source_manifest=MANIFEST,
+                expected_experiment_config_sha256=EXPECTED_EXPERIMENT_CONFIG_SHA256,
+                expected_array_job_id=ARRAY_JOB_ID,
+                scheduler_receipt=receipt,
+            )
 
     def test_exact_mean_and_two_positive_seed_boundary_passes(self) -> None:
         summary = _qualify(_document({42: 0.003, 43: 0.003, 44: 0.0}))

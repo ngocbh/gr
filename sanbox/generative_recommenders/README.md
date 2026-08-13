@@ -83,6 +83,7 @@ The number of gate parameters is
 
 | Dataset | HSTU backbone | Gate parameters | Total in each arm |
 | --- | ---: | ---: | ---: |
+| Amazon Books | 44,865,440 | 1,152 | 44,866,592 |
 | MovieLens-1M | 313,000 | 416 | 313,416 |
 | MovieLens-20M | 38,913,120 | 4,224 | 38,917,344 |
 
@@ -94,7 +95,7 @@ is the file paired with SAFA by the audit and provenance workflow.
 ## Run the two arms
 
 Run commands from the `sanbox/` repository root after preprocessing the
-MovieLens data. The launcher respects `GR_DATA_ROOT`, `GR_EXPS_ROOT`, and
+selected dataset. The launcher respects `GR_DATA_ROOT`, `GR_EXPS_ROOT`, and
 `GR_CKPTS_ROOT`; their defaults are `tmp/`, `exps/`, and `ckpts/`.
 
 ```bash
@@ -107,16 +108,21 @@ bash scripts/train.sh \
   --gin_bindings=train_fn.random_seed=42
 ```
 
-Equivalent paired configs exist under `configs/ml-20m/`.
+Equivalent paired configs exist under `configs/ml-20m/`. Amazon Books uses
+the `n512` pair under `configs/amzn-books/`.
 
 The controlled cluster workflow creates an immutable source snapshot, runs
 preflight equivalence and smoke checks, then submits paired HSTU/SAFA arrays
 for seeds 42, 43, and 44:
 
 ```bash
-submit_task=$(pueue add -p -w "$PWD" 'bash scripts/submit_safa_ab.sh')
+submit_task=$(pueue add -p -w "$PWD" \
+  'bash scripts/submit_safa_ab.sh amzn-books')
 pueue log "$submit_task" --full
 ```
+
+The optional selector is `amzn-books`, `ml-1m`, `ml-20m`, or `all`; omitting
+it submits all three datasets after one shared preflight.
 
 Commit all intended `sanbox/` source changes first; snapshot creation refuses a
 dirty source tree. Set `GR_DATA_ROOT`, `GR_EXPS_ROOT`, and `GR_CKPTS_ROOT`, and

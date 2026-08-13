@@ -4,10 +4,11 @@ The two qualification stages answer different questions and are intentionally
 separate.
 
 1. Commit the clean `sanbox/` source tree.
-2. Submit through pueue with `bash scripts/submit_safa_ab.sh`. The submitter
+2. Submit through pueue with `bash scripts/submit_safa_ab.sh DATASET`. The submitter
    creates an immutable snapshot, runs the exact-equivalence/config/inventory
    suite plus short HSTU/SAFA smokes on one `h200_dev` H200, and only then
-   releases the ML-1M and ML-20M seed arrays.
+   releases the selected Amazon Books, ML-1M, or ML-20M seed array. Use `all`
+   or omit the selector to submit all three.
 3. Export the six completed runs for one dataset to the JSON schema documented
    by `python scripts/qualify_safa_results.py --help`. Take `attention_mode`,
    `random_seed`, `resolved_gin_config`, `resolved_gin_config_sha256`, and
@@ -45,11 +46,15 @@ learning-rate, dropout, or any other operative Gin drift invalidates the set.
 The preflight records the intended identity in its manifest-specific marker;
 full jobs verify it before training and the post-run command pins it again.
 The array job ID is pinned independently from the submitter output. The gate
-also requires QoS `h200_dev` for ML-1M and `h200_mrs_2_high` for ML-20M, plus
+also requires QoS `h200_dev` for ML-1M and `h200_mrs_2_high` for Amazon Books
+and ML-20M, plus
 the exact task map `0..5` to seeds
 `42..44`, with HSTU on even tasks and SAFA on odd tasks. Full array runs require
 online W&B and fail if initialization, metric logging, or finalization fails;
 preflight smokes do not initialize W&B and are not post-run evidence.
+MovieLens qualification averages epochs 96--100. Amazon Books uses epoch 200,
+the final full-corpus evaluation; the intervening partial evaluations are not
+mixed into its reported result.
 
 The post-run CLI also queries `sacct` for the pinned array. It accepts only six
 distinct completed allocations on partition `h200`, with zero exit codes and

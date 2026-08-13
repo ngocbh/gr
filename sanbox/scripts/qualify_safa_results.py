@@ -28,7 +28,8 @@ Each run has the following shape::
       "epochs": [{"epoch": 96, "value": 0.19}, ...]
     }
 
-Extra epochs are allowed, but epochs 96 through 100 must be present exactly once.
+Extra epochs are allowed, but the dataset's frozen full-evaluation epochs must be
+present exactly once. MovieLens uses epochs 96--100; Amazon Books uses epoch 200.
 All provenance and inventory fields must agree across the six runs.
 The CLI independently verifies the six completed allocations with ``sacct``.
 """
@@ -59,7 +60,11 @@ EXPECTED_TASKS = (
     (44, "hstu"),
     (44, "safa"),
 )
-FINAL_EPOCHS = (96, 97, 98, 99, 100)
+FINAL_EPOCHS_BY_DATASET = {
+    "amzn-books": (200,),
+    "ml-1m": (96, 97, 98, 99, 100),
+    "ml-20m": (96, 97, 98, 99, 100),
+}
 MEAN_DELTA_THRESHOLD = 0.002
 POSITIVE_SEED_THRESHOLD = 2
 MIN_DELTA_THRESHOLD = -0.001
@@ -67,6 +72,7 @@ HEX_GIT_ID = re.compile(r"[0-9a-f]{40}")
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
 POSITIVE_DECIMAL_ID = re.compile(r"[1-9][0-9]*")
 REQUIRED_QOS_BY_DATASET = {
+    "amzn-books": "h200_mrs_2_high",
     "ml-1m": "h200_dev",
     "ml-20m": "h200_mrs_2_high",
 }
@@ -83,10 +89,12 @@ SCHEDULER_RECEIPT_KEYS = {
     "exit_code",
 }
 EXPECTED_PARAMETER_COUNTS = {
+    "amzn-books": 44_866_592,
     "ml-1m": 313_416,
     "ml-20m": 38_917_344,
 }
 EXPECTED_PARAMETER_INVENTORIES = {
+    "amzn-books": "b70951a7c770dc52da5b9333ec30d86e2b84e7208a02e8824142685006c96de4",
     "ml-1m": "2ca8f1559267c3a1741b2343092f2d2c55bcf2aff00265fa0dca8d628e6cf6c8",
     "ml-20m": "38636c03bbbbb842fd4a6fb81fa3f21e93ddf39d6509bb8d96bec42667c7f4d5",
 }
@@ -506,7 +514,12 @@ def _epoch_values(run: Mapping[str, Any]) -> Dict[int, Decimal]:
         if not Decimal(0) <= numeric_value <= Decimal(1):
             raise ResultsError("NDCG@10 value must be in [0, 1]")
         values[epoch] = numeric_value
-    missing_epochs = sorted(set(FINAL_EPOCHS) - set(values))
+    dataset = str(run["dataset"])
+    try:
+        final_epochs = FINAL_EPOCHS_BY_DATASET[dataset]
+    except KeyError as error:
+        raise ResultsError(f"unsupported dataset: {dataset}") from error
+    missing_epochs = sorted(set(final_epochs) - set(values))
     if missing_epochs:
         raise ResultsError(
             f"missing final epochs for seed={run['seed']} arm={run['arm']}: "
@@ -533,6 +546,7 @@ def qualify_results(
     runs: List[Mapping[str, Any]] = document["runs"]
     if expected_dataset not in EXPECTED_PARAMETER_COUNTS:
         raise ResultsError(f"unsupported dataset: {expected_dataset}")
+    final_epochs = FINAL_EPOCHS_BY_DATASET[expected_dataset]
     if len(runs) != len(SEEDS) * len(ARMS):
         raise ResultsError("runs must contain exactly six paired seed/arm entries")
     validate_scheduler_receipt(
@@ -586,8 +600,8 @@ def qualify_results(
             raise ResultsError(f"duplicate run for seed={run_key[0]} arm={run_key[1]}")
         values = _epoch_values(run)
         final_means[run_key] = sum(
-            (values[epoch] for epoch in FINAL_EPOCHS), start=Decimal(0)
-        ) / Decimal(len(FINAL_EPOCHS))
+            (values[epoch] for epoch in final_epochs), start=Decimal(0)
+        ) / Decimal(len(final_epochs))
 
     expected_keys = {(seed, arm) for seed in SEEDS for arm in ARMS}
     if set(final_means) != expected_keys:
@@ -662,7 +676,7 @@ def qualify_results(
         "scheduler_receipt": {
             str(task_id): dict(scheduler_receipt[task_id]) for task_id in range(6)
         },
-        "final_epochs": list(FINAL_EPOCHS),
+        "final_epochs": list(final_epochs),
         "thresholds": {
             "mean_delta_min": MEAN_DELTA_THRESHOLD,
             "positive_seed_count_min": POSITIVE_SEED_THRESHOLD,

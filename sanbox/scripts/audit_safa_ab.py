@@ -64,6 +64,19 @@ class PairSpec:
 
 
 PAIR_SPECS: Mapping[str, PairSpec] = {
+    "amzn-books": PairSpec(
+        dataset="amzn-books",
+        max_item_id=695762,
+        upstream_config=REPO_ROOT
+        / "configs/amzn-books/hstu-sampled-softmax-n512-large-final.gin",
+        hstu_config=REPO_ROOT
+        / "configs/amzn-books/hstu-matched-sampled-softmax-n512-large-final.gin",
+        safa_config=REPO_ROOT
+        / "configs/amzn-books/safa-sampled-softmax-n512-large-final.gin",
+        expected_backbone_parameters=44_865_440,
+        expected_forget_parameters=1_152,
+        expected_total_parameters=44_866_592,
+    ),
     "ml-1m": PairSpec(
         dataset="ml-1m",
         max_item_id=3952,

@@ -1,9 +1,27 @@
 #!/usr/bin/env bash
-# Snapshot, qualify, then submit ML-1M and ML-20M paired HSTU/SAFA arrays.
+# Snapshot, qualify, then submit selected paired HSTU/SAFA arrays.
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+selection="${1:-all}"
+if (( $# > 1 )); then
+  echo "usage: $0 [all|amzn-books|ml-1m|ml-20m]" >&2
+  exit 2
+fi
+case "$selection" in
+  all)
+    datasets=(amzn-books ml-1m ml-20m)
+    ;;
+  amzn-books|ml-1m|ml-20m)
+    datasets=("$selection")
+    ;;
+  *)
+    echo "usage: $0 [all|amzn-books|ml-1m|ml-20m]" >&2
+    exit 2
+    ;;
+esac
+
 : "${GR_DATA_ROOT:?GR_DATA_ROOT must be set}"
 : "${GR_EXPS_ROOT:?GR_EXPS_ROOT must be set}"
 : "${GR_CKPTS_ROOT:?GR_CKPTS_ROOT must be set}"
@@ -41,26 +59,42 @@ qualification_job="$(sbatch --parsable \
   --export="$common_export" \
   "$snapshot/scripts/sbatch_qualify_safa.sh")"
 qualification_job="${qualification_job%%;*}"
+if [[ ! "$qualification_job" =~ ^[1-9][0-9]*$ ]]; then
+  echo "sbatch returned an invalid qualification job ID: $qualification_job" >&2
+  exit 1
+fi
 
-ml1m_job="$(sbatch --parsable \
-  --partition=h200 --qos=h200_dev \
-  --job-name=safa-ab-ml1m \
-  --dependency="afterok:$qualification_job" \
-  --export="$common_export,GR_DATASET=ml-1m" \
-  "$snapshot/scripts/sbatch_safa_ab.sh")"
-ml20m_job="$(sbatch --parsable \
-  --partition=h200 --qos=h200_mrs_2_high \
-  --job-name=safa-ab-ml20m \
-  --dependency="afterok:$qualification_job" \
-  --export="$common_export,GR_DATASET=ml-20m" \
-  "$snapshot/scripts/sbatch_safa_ab.sh")"
-ml1m_job="${ml1m_job%%;*}"
-ml20m_job="${ml20m_job%%;*}"
-for array_job in "$ml1m_job" "$ml20m_job"; do
+declare -A array_jobs
+for dataset in "${datasets[@]}"; do
+  case "$dataset" in
+    amzn-books)
+      qos="h200_mrs_2_high"
+      time_limit="3-00:00:00"
+      job_name="safa-ab-amzn-books"
+      ;;
+    ml-1m)
+      qos="h200_dev"
+      time_limit="24:00:00"
+      job_name="safa-ab-ml1m"
+      ;;
+    ml-20m)
+      qos="h200_mrs_2_high"
+      time_limit="24:00:00"
+      job_name="safa-ab-ml20m"
+      ;;
+  esac
+  array_job="$(sbatch --parsable \
+    --partition=h200 --qos="$qos" --time="$time_limit" \
+    --job-name="$job_name" \
+    --dependency="afterok:$qualification_job" \
+    --export="$common_export,GR_DATASET=$dataset" \
+    "$snapshot/scripts/sbatch_safa_ab.sh")"
+  array_job="${array_job%%;*}"
   if [[ ! "$array_job" =~ ^[1-9][0-9]*$ ]]; then
     echo "sbatch returned an invalid array job ID: $array_job" >&2
     exit 1
   fi
+  array_jobs["$dataset"]="$array_job"
 done
 
 echo "source_snapshot=$snapshot"
@@ -68,7 +102,9 @@ echo "source_commit=$commit"
 echo "source_tree=$tree"
 echo "source_manifest=$manifest"
 echo "qualification_job=${qualification_job%%;*}"
-echo "ml1m_array_job=$ml1m_job"
-echo "ml20m_array_job=$ml20m_job"
-echo "postrun_ml1m=/bin/bash $snapshot/scripts/check_safa_results.sh RESULTS.json --expected-dataset ml-1m --expected-source-commit $commit --expected-source-tree $tree --expected-source-manifest $manifest --expected-experiment-config-sha256 \$(sed -n 's/^experiment_config_ml-1m=//p' '$qualification_marker') --expected-array-job-id $ml1m_job"
-echo "postrun_ml20m=/bin/bash $snapshot/scripts/check_safa_results.sh RESULTS.json --expected-dataset ml-20m --expected-source-commit $commit --expected-source-tree $tree --expected-source-manifest $manifest --expected-experiment-config-sha256 \$(sed -n 's/^experiment_config_ml-20m=//p' '$qualification_marker') --expected-array-job-id $ml20m_job"
+for dataset in "${datasets[@]}"; do
+  array_job="${array_jobs[$dataset]}"
+  label="${dataset//-/}"
+  echo "${label}_array_job=$array_job"
+  echo "postrun_${label}=/bin/bash $snapshot/scripts/check_safa_results.sh RESULTS.json --expected-dataset $dataset --expected-source-commit $commit --expected-source-tree $tree --expected-source-manifest $manifest --expected-experiment-config-sha256 \$(sed -n 's/^experiment_config_${dataset}=//p' '$qualification_marker') --expected-array-job-id $array_job"
+done

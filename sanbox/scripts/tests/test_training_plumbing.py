@@ -210,6 +210,33 @@ class SlurmProvenanceTest(unittest.TestCase):
                     dataset_name="ml-20m",
                 )
 
+    def test_amazon_books_requires_high_qos(self) -> None:
+        environment = {
+            "GR_REQUIRE_SLURM_PROVENANCE": "1",
+            "SLURM_ARRAY_JOB_ID": "123456",
+            "SLURM_ARRAY_TASK_ID": "0",
+            "SLURM_JOB_ID": "123456",
+            "SLURM_JOB_QOS": "h200_mrs_2_high",
+            "SLURM_RESTART_COUNT": "0",
+            "SLURM_JOB_PARTITION": "h200",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            provenance = _slurm_provenance(
+                attention_mode="hstu",
+                random_seed=42,
+                dataset_name="amzn-books",
+            )
+        self.assertEqual(provenance["slurm_job_qos"], "h200_mrs_2_high")
+
+        environment["SLURM_JOB_QOS"] = "h200_dev"
+        with mock.patch.dict(os.environ, environment, clear=True):
+            with self.assertRaisesRegex(ValueError, "h200_mrs_2_high"):
+                _slurm_provenance(
+                    attention_mode="hstu",
+                    random_seed=42,
+                    dataset_name="amzn-books",
+                )
+
     def test_scheduler_provenance_is_optional_outside_full_arrays(self) -> None:
         with mock.patch.dict(
             os.environ,
@@ -334,7 +361,7 @@ class GinConfigIdentityTest(unittest.TestCase):
 
 
 class SlurmContractTest(unittest.TestCase):
-    def test_full_array_is_one_h200_dev_gpu_per_paired_task(self) -> None:
+    def test_full_array_routes_each_dataset_to_expected_qos(self) -> None:
         wrapper = (REPO_ROOT / "scripts/sbatch_safa_ab.sh").read_text(encoding="utf-8")
         self.assertIn("#SBATCH --partition=h200", wrapper)
         self.assertIn("#SBATCH --qos=h200_dev", wrapper)
@@ -343,8 +370,20 @@ class SlurmContractTest(unittest.TestCase):
         self.assertIn("seeds=(42 43 44)", wrapper)
         self.assertIn("SLURM_ARRAY_TASK_ID / 2", wrapper)
         self.assertIn("SLURM_ARRAY_TASK_ID % 2", wrapper)
-        self.assertIn('ml-1m) required_qos="h200_dev"', wrapper)
-        self.assertIn('ml-20m) required_qos="h200_mrs_2_high"', wrapper)
+        self.assertIn(
+            'amzn-books)\n    required_qos="h200_mrs_2_high"\n'
+            "    num_negatives=512",
+            wrapper,
+        )
+        self.assertIn(
+            'ml-1m)\n    required_qos="h200_dev"\n    num_negatives=128',
+            wrapper,
+        )
+        self.assertIn(
+            'ml-20m)\n    required_qos="h200_mrs_2_high"\n'
+            "    num_negatives=128",
+            wrapper,
+        )
         self.assertIn("GR_EXPECTED_EXPERIMENT_CONFIG_SHA256", wrapper)
         self.assertIn("GR_REQUIRE_SLURM_PROVENANCE=1", wrapper)
         self.assertIn("GR_REQUIRE_WANDB=1", wrapper)
@@ -356,6 +395,7 @@ class SlurmContractTest(unittest.TestCase):
     def test_preflight_pins_canonical_experiment_identities(self) -> None:
         qualifier = (REPO_ROOT / "scripts/qualify_safa.sh").read_text(encoding="utf-8")
         self.assertIn("GR_CONFIG_IDENTITY_ONLY=1", qualifier)
+        self.assertIn("experiment_config_amzn-books=", qualifier)
         self.assertIn("experiment_config_ml-1m=", qualifier)
         self.assertIn("experiment_config_ml-20m=", qualifier)
         self.assertIn("unset WANDB_MODE WANDB_DISABLED", qualifier)
@@ -366,20 +406,23 @@ class SlurmContractTest(unittest.TestCase):
         self.assertIn("qualification_job_qos=$actual_qos", qualifier)
         self.assertIn("qualification_job_partition=$actual_partition", qualifier)
 
-    def test_submission_is_gated_on_qualification_for_both_datasets(self) -> None:
+    def test_submission_is_gated_on_qualification_for_selected_datasets(self) -> None:
         submitter = (REPO_ROOT / "scripts/submit_safa_ab.sh").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(submitter.count('dependency="afterok:$qualification_job"'), 2)
-        self.assertIn("GR_DATASET=ml-1m", submitter)
-        self.assertIn("GR_DATASET=ml-20m", submitter)
-        self.assertIn("--partition=h200 --qos=h200_mrs_2_high", submitter)
-        self.assertIn("--job-name=safa-ab-ml1m", submitter)
-        self.assertIn("--job-name=safa-ab-ml20m", submitter)
-        self.assertIn("postrun_ml1m=", submitter)
-        self.assertIn("postrun_ml20m=", submitter)
-        self.assertEqual(submitter.count("--expected-experiment-config-sha256"), 2)
-        self.assertEqual(submitter.count("--expected-array-job-id"), 2)
+        self.assertIn("datasets=(amzn-books ml-1m ml-20m)", submitter)
+        self.assertIn("amzn-books|ml-1m|ml-20m)", submitter)
+        self.assertEqual(submitter.count('dependency="afterok:$qualification_job"'), 1)
+        self.assertIn("GR_DATASET=$dataset", submitter)
+        self.assertIn('qos="h200_mrs_2_high"', submitter)
+        self.assertIn('time_limit="3-00:00:00"', submitter)
+        self.assertIn("--job-name=\"$job_name\"", submitter)
+        self.assertIn('job_name="safa-ab-amzn-books"', submitter)
+        self.assertIn('job_name="safa-ab-ml1m"', submitter)
+        self.assertIn('job_name="safa-ab-ml20m"', submitter)
+        self.assertIn('echo "postrun_${label}=', submitter)
+        self.assertEqual(submitter.count("--expected-experiment-config-sha256"), 1)
+        self.assertEqual(submitter.count("--expected-array-job-id"), 1)
         self.assertIn("GR_CODE_SNAPSHOT=$snapshot", submitter)
         self.assertNotIn("WANDB_API_KEY=", submitter)
 
@@ -450,6 +493,9 @@ class SlurmContractTest(unittest.TestCase):
                         "qualification_job_qos=h200_dev",
                         "qualification_job_partition=h200",
                         "qualification_restart_count=0",
+                        "dataset_amzn-books_sha256="
+                        "b58804a08f835f0d85cb2d50628166670ee96c5808d622434ca57d2a48cdf491",
+                        f"experiment_config_amzn-books={'c' * 64}",
                         f"experiment_config_ml-1m={'d' * 64}",
                         f"experiment_config_ml-20m={'e' * 64}",
                     )
@@ -664,6 +710,47 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                 high["argv"][2].endswith(
                     "configs/ml-20m/safa-sampled-softmax-n128-large-final.gin"
                 )
+            )
+
+            amazon_data = temporary_root / "data/amzn_books/sasrec_format.csv"
+            amazon_data.parent.mkdir(parents=True, exist_ok=True)
+            amazon_data.write_text("frozen test fixture\n", encoding="utf-8")
+            fake_sha256sum = fake_bin / "sha256sum"
+            fake_sha256sum.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s  %s\\n' "
+                "'b58804a08f835f0d85cb2d50628166670ee96c5808d622434ca57d2a48cdf491' "
+                '"$1"\n',
+                encoding="utf-8",
+            )
+            fake_sha256sum.chmod(0o755)
+            amazon_capture = temporary_root / "capture-amazon.json"
+            amazon_environment = {
+                **high_environment,
+                "CAPTURE_PATH": str(amazon_capture),
+                "GR_DATASET": "amzn-books",
+            }
+            subprocess.run(
+                ["/bin/bash", str(spooled_wrapper)],
+                check=True,
+                env=amazon_environment,
+                capture_output=True,
+                text=True,
+            )
+            amazon = json.loads(amazon_capture.read_text(encoding="utf-8"))
+            self.assertEqual(amazon["slurm_job_qos"], "h200_mrs_2_high")
+            self.assertTrue(
+                amazon["argv"][2].endswith(
+                    "configs/amzn-books/safa-sampled-softmax-n512-large-final.gin"
+                )
+            )
+            self.assertEqual(amazon["expected_experiment_config"], "c" * 64)
+            self.assertEqual(
+                amazon["experiment_name"], "safa-ab-amzn-books-safa-seed44-999-r0"
+            )
+            self.assertEqual(
+                amazon["wandb_tags"],
+                "safa-ab,amzn-books,safa,seed-44,parameter-matched",
             )
 
 

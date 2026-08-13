@@ -16,7 +16,7 @@ set -euo pipefail
 : "${GR_CODE_SNAPSHOT:?missing immutable source snapshot path}"
 repo_root="$(realpath -e "$GR_CODE_SNAPSHOT")"
 : "${GR_EXPECTED_SOURCE_MANIFEST:?missing pinned snapshot manifest}"
-: "${GR_DATASET:?GR_DATASET must be ml-1m or ml-20m}"
+: "${GR_DATASET:?GR_DATASET must be amzn-books, ml-1m, or ml-20m}"
 : "${GR_DATA_ROOT:?GR_DATA_ROOT must be set}"
 : "${GR_EXPS_ROOT:?GR_EXPS_ROOT must be set}"
 : "${GR_CKPTS_ROOT:?GR_CKPTS_ROOT must be set}"
@@ -82,8 +82,20 @@ if [[ -n "$reported_restart_count" ]]; then
   fi
 fi
 case "$GR_DATASET" in
-  ml-1m) required_qos="h200_dev" ;;
-  ml-20m) required_qos="h200_mrs_2_high" ;;
+  amzn-books)
+    required_qos="h200_mrs_2_high"
+    num_negatives=512
+    dataset_file="$GR_DATA_ROOT/amzn_books/sasrec_format.csv"
+    dataset_sha256="b58804a08f835f0d85cb2d50628166670ee96c5808d622434ca57d2a48cdf491"
+    ;;
+  ml-1m)
+    required_qos="h200_dev"
+    num_negatives=128
+    ;;
+  ml-20m)
+    required_qos="h200_mrs_2_high"
+    num_negatives=128
+    ;;
   *)
     echo "unsupported dataset: $GR_DATASET" >&2
     exit 2
@@ -96,6 +108,17 @@ fi
 if [[ "$actual_partition" != "h200" ]]; then
   echo "experiment requires partition h200" >&2
   exit 1
+fi
+if [[ "$GR_DATASET" == "amzn-books" ]]; then
+  if [[ ! -f "$dataset_file" || -L "$dataset_file" ]]; then
+    echo "Amazon Books data must be a regular file: $dataset_file" >&2
+    exit 1
+  fi
+  actual_dataset_sha256="$(sha256sum "$dataset_file" | cut -d' ' -f1)"
+  if [[ "$actual_dataset_sha256" != "$dataset_sha256" ]]; then
+    echo "Amazon Books data checksum does not match the frozen experiment data" >&2
+    exit 1
+  fi
 fi
 export SLURM_JOB_QOS="$actual_qos"
 export SLURM_JOB_PARTITION="$actual_partition"
@@ -121,7 +144,8 @@ for expected_line in \
   "source_commit=$GR_SOURCE_COMMIT" \
   "source_tree=$GR_SOURCE_TREE" \
   "qualification_job_qos=h200_dev" \
-  "qualification_job_partition=h200"; do
+  "qualification_job_partition=h200" \
+  "dataset_amzn-books_sha256=b58804a08f835f0d85cb2d50628166670ee96c5808d622434ca57d2a48cdf491"; do
   if ! grep -Fxq "$expected_line" "$qualification_marker"; then
     echo "qualification marker is incomplete: $expected_line" >&2
     exit 1
@@ -140,10 +164,10 @@ seeds=(42 43 44)
 seed="${seeds[$((SLURM_ARRAY_TASK_ID / 2))]}"
 if (( SLURM_ARRAY_TASK_ID % 2 == 0 )); then
   mode="hstu"
-  config="configs/$GR_DATASET/hstu-matched-sampled-softmax-n128-large-final.gin"
+  config="configs/$GR_DATASET/hstu-matched-sampled-softmax-n${num_negatives}-large-final.gin"
 else
   mode="safa"
-  config="configs/$GR_DATASET/safa-sampled-softmax-n128-large-final.gin"
+  config="configs/$GR_DATASET/safa-sampled-softmax-n${num_negatives}-large-final.gin"
 fi
 
 run_name="safa-ab-$GR_DATASET-$mode-seed$seed-$SLURM_ARRAY_JOB_ID-r$actual_restart_count"

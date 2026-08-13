@@ -146,6 +146,7 @@ def _slurm_provenance(
     if re.fullmatch(r"[0-5]", task_id_string) is None:
         raise ValueError("slurm_array_task_id must be an integer in [0, 5]")
     required_qos = {
+        "amzn-books": "h200_mrs_2_high",
         "ml-1m": "h200_dev",
         "ml-20m": "h200_mrs_2_high",
     }.get(dataset_name)

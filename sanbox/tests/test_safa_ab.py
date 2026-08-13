@@ -85,6 +85,49 @@ class PairedConfigTest(unittest.TestCase):
             with self.subTest(dataset=spec.dataset):
                 audit_safa_ab.assert_upstream_fidelity(spec)
 
+    def test_dataset_specs_cover_amazon_and_movielens(self) -> None:
+        expected = {
+            "amzn-books": (
+                695_762,
+                44_865_440,
+                1_152,
+                44_866_592,
+                "hstu-matched-sampled-softmax-n512-large-final.gin",
+                "safa-sampled-softmax-n512-large-final.gin",
+            ),
+            "ml-1m": (
+                3_952,
+                313_000,
+                416,
+                313_416,
+                "hstu-matched-sampled-softmax-n128-large-final.gin",
+                "safa-sampled-softmax-n128-large-final.gin",
+            ),
+            "ml-20m": (
+                131_262,
+                38_913_120,
+                4_224,
+                38_917_344,
+                "hstu-matched-sampled-softmax-n128-large-final.gin",
+                "safa-sampled-softmax-n128-large-final.gin",
+            ),
+        }
+        self.assertEqual(set(audit_safa_ab.PAIR_SPECS), set(expected))
+        for dataset, values in expected.items():
+            with self.subTest(dataset=dataset):
+                spec = audit_safa_ab.PAIR_SPECS[dataset]
+                self.assertEqual(
+                    (
+                        spec.max_item_id,
+                        spec.expected_backbone_parameters,
+                        spec.expected_forget_parameters,
+                        spec.expected_total_parameters,
+                        spec.hstu_config.name,
+                        spec.safa_config.name,
+                    ),
+                    values,
+                )
+
     def test_shared_drift_from_upstream_is_rejected(self) -> None:
         spec = audit_safa_ab.PAIR_SPECS["ml-1m"]
         with tempfile.TemporaryDirectory() as temporary_directory:
