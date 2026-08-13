@@ -13,7 +13,8 @@
 
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+: "${GR_CODE_SNAPSHOT:?missing immutable source snapshot path}"
+repo_root="$(realpath -e "$GR_CODE_SNAPSHOT")"
 : "${GR_EXPECTED_SOURCE_MANIFEST:?missing pinned snapshot manifest}"
 : "${GR_DATASET:?GR_DATASET must be ml-1m or ml-20m}"
 : "${GR_DATA_ROOT:?GR_DATA_ROOT must be set}"

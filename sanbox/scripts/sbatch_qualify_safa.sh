@@ -11,5 +11,6 @@
 
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+: "${GR_CODE_SNAPSHOT:?missing immutable source snapshot path}"
+repo_root="$(realpath -e "$GR_CODE_SNAPSHOT")"
 exec /bin/bash "$repo_root/scripts/qualify_safa.sh"

@@ -18,6 +18,7 @@ for export_value in \
   "$GR_DATA_ROOT" \
   "$GR_EXPS_ROOT" \
   "$GR_CKPTS_ROOT" \
+  "$GR_CODE_SNAPSHOT_ROOT" \
   "$GR_QUALIFICATION_ROOT"; do
   if [[ "$export_value" == *","* || "$export_value" == *$'\n'* ]]; then
     echo "SLURM export paths must not contain commas or newlines" >&2
@@ -34,7 +35,7 @@ commit="$(<"$snapshot/SOURCE_COMMIT")"
 tree="$(<"$snapshot/SOURCE_TREE")"
 qualification_marker="$GR_QUALIFICATION_ROOT/$manifest.passed"
 
-common_export="ALL,GR_EXPECTED_SOURCE_MANIFEST=$manifest,GR_DATA_ROOT=$GR_DATA_ROOT,GR_EXPS_ROOT=$GR_EXPS_ROOT,GR_CKPTS_ROOT=$GR_CKPTS_ROOT,GR_QUALIFICATION_ROOT=$GR_QUALIFICATION_ROOT,GR_REQUIRE_WANDB=0,GR_REQUIRE_SLURM_PROVENANCE=0"
+common_export="ALL,GR_CODE_SNAPSHOT=$snapshot,GR_EXPECTED_SOURCE_MANIFEST=$manifest,GR_DATA_ROOT=$GR_DATA_ROOT,GR_EXPS_ROOT=$GR_EXPS_ROOT,GR_CKPTS_ROOT=$GR_CKPTS_ROOT,GR_QUALIFICATION_ROOT=$GR_QUALIFICATION_ROOT,GR_REQUIRE_WANDB=0,GR_REQUIRE_SLURM_PROVENANCE=0"
 qualification_job="$(sbatch --parsable \
   --partition=h200 --qos=h200_mrs_shared \
   --export="$common_export" \

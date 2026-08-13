@@ -337,7 +337,36 @@ class SlurmContractTest(unittest.TestCase):
         self.assertIn("postrun_ml20m=", submitter)
         self.assertEqual(submitter.count("--expected-experiment-config-sha256"), 2)
         self.assertEqual(submitter.count("--expected-array-job-id"), 2)
+        self.assertIn("GR_CODE_SNAPSHOT=$snapshot", submitter)
         self.assertNotIn("WANDB_API_KEY=", submitter)
+
+    def test_preflight_wrapper_reaches_exported_snapshot_when_spooled(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            snapshot = temporary_root / "snapshot"
+            scripts = snapshot / "scripts"
+            scripts.mkdir(parents=True)
+            (scripts / "qualify_safa.sh").write_text(
+                "#!/usr/bin/env bash\nprintf 'snapshot=%s\\n' \"$GR_CODE_SNAPSHOT\"\n",
+                encoding="utf-8",
+            )
+            spool = temporary_root / "spool"
+            spool.mkdir()
+            spooled_wrapper = spool / "slurm_script"
+            spooled_wrapper.write_bytes(
+                (REPO_ROOT / "scripts/sbatch_qualify_safa.sh").read_bytes()
+            )
+
+            completed = subprocess.run(
+                ["/bin/bash", str(spooled_wrapper)],
+                check=False,
+                env={**os.environ, "GR_CODE_SNAPSHOT": str(snapshot)},
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, f"snapshot={snapshot}\n")
 
     def test_array_task_map_reaches_pinned_snapshot_launcher(self) -> None:
         expected_tasks = (
@@ -356,6 +385,12 @@ class SlurmContractTest(unittest.TestCase):
                 snapshot,
                 commit_id="a" * 40,
                 tree_id="b" * 40,
+            )
+            spool = temporary_root / "spool"
+            spool.mkdir()
+            spooled_wrapper = spool / "slurm_script"
+            spooled_wrapper.write_bytes(
+                (snapshot / "scripts/sbatch_safa_ab.sh").read_bytes()
             )
             qualification_root = temporary_root / "qualifications"
             qualification_root.mkdir()
@@ -432,6 +467,7 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                         "PATH": f"{fake_bin}:{os.environ['PATH']}",
                         "CAPTURE_PATH": str(capture),
                         "GR_PYTHON": str(fake_python),
+                        "GR_CODE_SNAPSHOT": str(snapshot),
                         "GR_EXPECTED_SOURCE_MANIFEST": provenance["source_manifest"],
                         "GR_DATASET": "ml-1m",
                         "GR_DATA_ROOT": str(temporary_root / "data"),
@@ -451,7 +487,7 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                     subprocess.run(
                         [
                             "/bin/bash",
-                            str(snapshot / "scripts/sbatch_safa_ab.sh"),
+                            str(spooled_wrapper),
                         ],
                         check=True,
                         env=environment,
@@ -508,7 +544,7 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                 "SLURM_RESTART_COUNT": "2",
             }
             subprocess.run(
-                ["/bin/bash", str(snapshot / "scripts/sbatch_safa_ab.sh")],
+                ["/bin/bash", str(spooled_wrapper)],
                 check=True,
                 env=restarted_environment,
                 capture_output=True,
@@ -529,7 +565,7 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                         key: value,
                     }
                     mismatched = subprocess.run(
-                        ["/bin/bash", str(snapshot / "scripts/sbatch_safa_ab.sh")],
+                        ["/bin/bash", str(spooled_wrapper)],
                         check=False,
                         env=mismatched_environment,
                         capture_output=True,
@@ -550,7 +586,7 @@ Path(os.environ["CAPTURE_PATH"]).write_text(json.dumps({
                 "SLURM_RESTART_COUNT": "0",
             }
             rejected = subprocess.run(
-                ["/bin/bash", str(snapshot / "scripts/sbatch_safa_ab.sh")],
+                ["/bin/bash", str(spooled_wrapper)],
                 check=False,
                 env=rejected_environment,
                 capture_output=True,
